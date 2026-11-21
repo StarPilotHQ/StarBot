@@ -9,6 +9,7 @@ import {
 } from 'discord.js';
 import { readFileSync } from 'fs';
 import { loadConfig } from '../config.js';
+import { logHelpUrl } from '../wiki/links.js';
 import { createLogger } from '../logger.js';
 import { fetchWikiPages } from '../wiki/fetcher.js';
 import { buildIndex } from '../wiki/indexer.js';
@@ -67,7 +68,7 @@ export class BotEvents {
       [
         { label: 'Set Nickname & Vehicle', customId: 'set_identity', style: ButtonStyle.Primary, emoji: '🎭' },
       ],
-      'Welcome to **StarPilot Server**! To gain access to the rest of the community, please set your server nickname and register your primary vehicle.\n\nYou can click this button at any time to update your vehicle or name in the future.',
+      `Welcome to **${config.projectName} Server**! To gain access to the rest of the community, please set your server nickname and register your primary vehicle.\n\nYou can click this button at any time to update your vehicle or name in the future.`,
     ).catch(err => log.error({ err }, 'Failed to set up identification button'));
 
     await recoverFreeze(client);
@@ -98,7 +99,7 @@ export class BotEvents {
               '**Requests vs. Development:** Feature requests are designed to suggest ideas for the maintainers to review and potentially build.\n\n' +
               `**Developing it yourself?** We absolutely love contributors and think it is awesome when you want to tackle a feature. If you plan to build it yourself, there is no need to open a feature request here. Instead, jump over to <#${config.developmentChannelId}> and start a thread. We are always happy to provide feedback, help troubleshoot problems, and cheer you on there!\n\n` +
               '### 🆘 Route Logs!?\n\n' +
-              'A quick overview of routes and how to upload logs can be found [here](https://wiki.firestar.link/faq/#how-do-i-upload-logs-for-troubleshooting): https://wiki.firestar.link/faq/#how-do-i-upload-logs-for-troubleshooting',
+              `A quick overview of routes and how to upload logs can be found [here](${logHelpUrl()}): ${logHelpUrl()}`,
           )
           .setColor(5822093),
         new EmbedBuilder()
@@ -130,7 +131,7 @@ export class BotEvents {
 
     const status = getInitStatus();
     log.info(`Wiki status: ${status}`);
-    log.info('StarPilot bot is ready');
+    log.info(`${loadConfig().projectName} bot is ready`);
 
     initTitleSync(client);
     initCloseScheduler(client);

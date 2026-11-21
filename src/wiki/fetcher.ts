@@ -3,6 +3,7 @@ import path from 'path';
 import { createLogger } from '../logger.js';
 import { githubFetch } from '../github.js';
 import { type WikiPage } from './types.js';
+import { wikiUrl } from './links.js';
 
 const log = createLogger('wiki:fetcher');
 
@@ -20,7 +21,7 @@ function pageUrl(relativePath: string): string {
   const withoutExt = relativePath.replace(/\.md$/, '');
   const cleaned = withoutExt.replace(/\/?index$/, '');
   const suffix = cleaned ? `${cleaned}/` : '';
-  return `https://wiki.firestar.link/${suffix}`;
+  return wikiUrl(suffix);
 }
 
 async function getTreeSha(repo: string, branch: string): Promise<string> {
@@ -71,7 +72,7 @@ export async function fetchWikiPages(
       const cached = JSON.parse(fs.readFileSync(pagesPath, 'utf-8')) as WikiPage[];
       if (cached.length > 0) {
         log.info(`Wiki loaded from cache (${cached.length} pages)`);
-        return cached;
+        return cached.map(page => ({ ...page, url: pageUrl(page.path) }));
       }
     } catch {}
   }

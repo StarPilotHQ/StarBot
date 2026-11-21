@@ -4,13 +4,11 @@ import { createLogger } from './logger.js';
 
 const log = createLogger('github');
 
-const DEFAULT_COMMIT_BRANCHES = ['StarPilot', 'Dom'] as const;
-
 // The commit picker offers the wait branch so "newer than a specific commit"
 // stays consistent with what the commit watcher activates on.
 function commitBranches(): string[] {
-  const wait = loadConfig().uatWaitBranch;
-  return [...new Set(wait ? ['StarPilot', wait] : DEFAULT_COMMIT_BRANCHES)];
+  const { stableBranch, testingBranch, uatWaitBranch } = loadConfig();
+  return [...new Set([stableBranch, uatWaitBranch ?? testingBranch])];
 }
 
 export interface CommitChoice {

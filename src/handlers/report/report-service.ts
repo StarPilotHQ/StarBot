@@ -6,6 +6,7 @@ import {
   EmbedBuilder,
 } from 'discord.js';
 import { loadConfig, type BotConfig } from '../../config.js';
+import { logHelpUrl } from '../../wiki/links.js';
 import { createLogger } from '../../logger.js';
 import { getIndex } from '../../wiki/wiki.js';
 import { searchWiki, formatWikiResults } from '../../wiki/searcher.js';
@@ -85,7 +86,7 @@ export function donateField(config: BotConfig): { name: string; value: string } 
   if (!config.donateChannelId) return null;
   return {
     name: '​',
-    value: `-# 💜 StarPilot is free - if it has helped you, consider supporting it in <#${config.donateChannelId}>`,
+    value: `-# 💜 ${config.projectName} is free - if it has helped you, consider supporting it in <#${config.donateChannelId}>`,
   };
 }
 
@@ -265,7 +266,7 @@ export async function submitReport(
       .setStyle(ButtonStyle.Primary)
       .setEmoji('📍');
     await thread.send({
-      content: `<@${params.reporterId}> Your route is valid but not yet public. Once you've made it public, click the button below to link it to this report.\n\nNeed help? Follow [these instructions](<https://wiki.firestar.link/faq/#how-do-i-upload-logs-for-troubleshooting>).`,
+      content: `<@${params.reporterId}> Your route is valid but not yet public. Once you've made it public, click the button below to link it to this report.\n\nNeed help? Follow [these instructions](<${logHelpUrl()}>).`,
       components: [new ActionRowBuilder<ButtonBuilder>().addComponents(btn)],
     }).catch(err => log.error({ err }, 'Failed to send primary confirm button'));
   }

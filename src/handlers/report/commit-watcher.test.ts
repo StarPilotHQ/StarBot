@@ -6,7 +6,7 @@ vi.mock('../../config.js', () => ({
   loadConfig: vi.fn(() => ({
     mainRepo: 'owner/main',
     uatWaitRepo: undefined,
-    uatWaitBranch: 'Dom',
+    uatWaitBranch: 'testing',
     uatPollMinutes: 5,
   })),
 }));
@@ -32,7 +32,7 @@ const mockConfig = vi.mocked(loadConfig);
 const mockTip = vi.mocked(fetchBranchTip);
 
 function tip(sha: string): CommitTip & { subject: string } {
-  return { sha, short: sha.slice(0, 7), branch: 'Dom', subject: 'fix: thing', date: '2026-08-26T00:00:00Z', repo: 'owner/main' };
+  return { sha, short: sha.slice(0, 7), branch: 'testing', subject: 'fix: thing', date: '2026-08-26T00:00:00Z', repo: 'owner/main' };
 }
 
 async function collect(): Promise<CommitTip[]> {
@@ -47,7 +47,7 @@ beforeEach(() => {
   mockConfig.mockReturnValue({
     mainRepo: 'owner/main',
     uatWaitRepo: undefined,
-    uatWaitBranch: 'Dom',
+    uatWaitBranch: 'testing',
     uatPollMinutes: 5,
   } as ReturnType<typeof loadConfig>);
 });
@@ -82,7 +82,7 @@ describe('pollOnce', () => {
     mockTip.mockResolvedValue(tip('c'.repeat(40)));
     const seen = await collect();
     await pollOnce();
-    expect(mockTip).toHaveBeenCalledWith('owner/main', 'Dom');
+    expect(mockTip).toHaveBeenCalledWith('owner/main', 'testing');
     expect(seen[0].repo).toBe('owner/main');
   });
 
@@ -90,12 +90,12 @@ describe('pollOnce', () => {
     mockConfig.mockReturnValue({
       mainRepo: 'owner/main',
       uatWaitRepo: 'owner/wait',
-      uatWaitBranch: 'Dom',
+      uatWaitBranch: 'testing',
       uatPollMinutes: 5,
     } as ReturnType<typeof loadConfig>);
     mockTip.mockResolvedValue({ ...tip('d'.repeat(40)), repo: 'owner/wait' });
     await pollOnce();
-    expect(mockTip).toHaveBeenCalledWith('owner/wait', 'Dom');
+    expect(mockTip).toHaveBeenCalledWith('owner/wait', 'testing');
   });
 
   it('emits nothing when the fetch fails', async () => {

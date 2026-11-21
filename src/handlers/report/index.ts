@@ -18,6 +18,7 @@ import {
   ApplicationCommandType,
 } from 'discord.js';
 import { loadConfig } from '../../config.js';
+import { logHelpUrl } from '../../wiki/links.js';
 import { createLogger } from '../../logger.js';
 import { createStore } from '../../store.js';
 import { COLORS } from '../../util.js';
@@ -488,7 +489,7 @@ async function processBugReport(
       new ButtonBuilder()
         .setLabel('Need help?')
         .setStyle(ButtonStyle.Link)
-        .setURL('https://wiki.firestar.link/faq/#how-do-i-upload-logs-for-troubleshooting'),
+        .setURL(logHelpUrl()),
       new ButtonBuilder()
         .setCustomId(`rlogfrc_${token}`)
         .setLabel("I know what I'm doing, submit anyway")
@@ -593,7 +594,7 @@ async function handleConfirmRoute(interaction: ButtonInteraction) {
 
   if (!nowPublic) {
     await interaction.reply({
-      content: `Your route is still not public. Make sure it's accessible on [${platformName}](${routeUrl}) and try again.\n\nFollow [these instructions](<https://wiki.firestar.link/faq/#how-do-i-upload-logs-for-troubleshooting>) to make your route public.`,
+      content: `Your route is still not public. Make sure it's accessible on [${platformName}](${routeUrl}) and try again.\n\nFollow [these instructions](<${logHelpUrl()}>) to make your route public.`,
       flags: MessageFlags.Ephemeral,
     });
     return;

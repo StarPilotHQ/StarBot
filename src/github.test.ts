@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('./config.js', () => ({ loadConfig: () => ({ mainRepo: 'owner/repo' }) }));
+vi.mock('./config.js', () => ({ loadConfig: () => ({ mainRepo: 'owner/repo', stableBranch: 'stable', testingBranch: 'testing' }) }));
 vi.mock('./logger.js', () => ({
   createLogger: () => ({ warn: () => {}, error: () => {}, info: () => {}, debug: () => {} }),
 }));
@@ -20,7 +20,7 @@ describe('fetchCommitChoices', () => {
     const dom = commit('d'.repeat(40), '2026-06-20T06:00:00Z');
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       const branch = new URL(url).searchParams.get('sha');
-      return { ok: true, json: async () => (branch === 'Dom' ? [shared, dom] : [shared, star]) };
+      return { ok: true, json: async () => (branch === 'testing' ? [shared, dom] : [shared, star]) };
     }));
 
     const values = (await fetchCommitChoices()).map(c => c.sha);

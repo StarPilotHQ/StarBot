@@ -23,6 +23,7 @@ import {
   PermissionFlagsBits,
 } from 'discord.js';
 import { loadConfig } from '../../config.js';
+import { galaxyUpdateUrl, logHelpUrl } from '../../wiki/links.js';
 import { createLogger } from '../../logger.js';
 import { createStore } from '../../store.js';
 import { COLORS, formatGitCommit, discordTimestamp, timeAgo, isStaleBuild } from '../../util.js';
@@ -97,6 +98,15 @@ async function getOrCreateAssigneeTag(forum: import('discord.js').ForumChannel, 
     log.warn({ err, tagName }, 'Failed to create assignee tag');
     return null;
   }
+}
+
+function repoOwner(repo: string): string {
+  return repo.split('/')[0];
+}
+
+// The comma installer reads `owner/branch` (it assumes the repo is `owner/openpilot`), so users get the branch, never the repo name.
+function branchSwitchHint(owner: string, branch: string): string {
+  return `If you're on a different branch, you can switch in Galaxy under **System Tools → Advanced Options**. For a fresh install, use \`${owner}/${branch}\`.`;
 }
 
 export function hasStaffRole(member: GuildMember): boolean {
@@ -243,7 +253,6 @@ const pendingAdditionalReportStore = createStore<{
   readyMsgId: string | null;
 }>('pending-additional-report', { ttl: 15 * 60 * 1000 });
 
-const LOG_HELP_URL = 'https://wiki.firestar.link/faq/#how-do-i-upload-logs-for-troubleshooting';
 
 const CLOSING_LOCK_MSG = "This report is closing soon - it can't be reopened until then.";
 
@@ -401,7 +410,8 @@ async function finalizeWaitUser(thread: ThreadChannel, forum: ForumChannel, para
     required = `\n\nThe route must be on commit ${formatGitCommit(params.requiredSha, `github.com/${loadConfig().mainRepo}`)} (${params.branch}${committed ? `, committed ${committed}` : ''}) or newer.`;
   } else if (params.mode === 'newernow' && requiredDate) {
     const committed = discordTimestamp(requiredDate);
-    required = `\n\nThe route must be on a commit newer than the latest one${committed ? ` as of ${committed}` : ''}. An update will be pushed to the testing branch \`Dom\` shortly - see the [branch switching guide](https://wiki.firestar.link/software/starpilot/#changing-branches) to switch to it.`;
+    const { testingBranch, projectName, mainRepo } = loadConfig();
+    required =`\n\nThe route must be on a commit newer than the latest one${committed ? ` as of ${committed}` : ''}. An update will be pushed to the \`${testingBranch}\` branch of ${projectName} shortly.\n\n${branchSwitchHint(repoOwner(mainRepo), testingBranch)}`;
   }
 
   const embed = new EmbedBuilder()
@@ -465,13 +475,14 @@ async function finalizeFixIncoming(thread: ThreadChannel, forum: ForumChannel, p
 
   const { uatWaitRepo, uatWaitBranch, mainRepo } = loadConfig();
   if (!uatWaitBranch) return; // unreachable: guarded by waitBranchConfigured() in finalizeWaitUser
-  const repo = uatWaitRepo ?? mainRepo;
+  const installOwner = repoOwner(uatWaitRepo ?? mainRepo);
   const label = await labelForThread(thread.id, thread.name);
 
   const description =
     `${params.message ? params.message + '\n\n' : ''}` +
-    `The developers are working on your ${reportNoun(label)}. The fix will land in the next batch of commits pushed to the \`${uatWaitBranch}\` branch of \`${repo}\`.` +
-    `\n\nThis thread will update automatically once it's ready. You'll then update your local install - see [Using Galaxy (recommended)](https://wiki.firestar.link/software/starpilot/#using-galaxy-recommended).` +
+    `The developers are working on your ${reportNoun(label)}. The fix will land in the next batch of commits pushed to the \`${uatWaitBranch}\` branch of ${loadConfig().projectName}.` +
+    `\n\n${branchSwitchHint(installOwner, uatWaitBranch)}` +
+    `\n\nThis thread will update automatically once it's ready. You'll then update your local install - see [Using Galaxy (recommended)](${galaxyUpdateUrl()}).` +
     `\n(no @pings please)`;
 
   const sent = await thread.send({
@@ -868,7 +879,7 @@ export async function submitAdditionalReport(params: {
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setCustomId(`archk_${token}`).setLabel('Check Again').setStyle(ButtonStyle.Primary).setEmoji('🔄'),
         new ButtonBuilder().setCustomId(`arfrc_${token}`).setLabel('Share Anyway').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setLabel('Need help?').setStyle(ButtonStyle.Link).setURL(LOG_HELP_URL),
+        new ButtonBuilder().setLabel('Need help?').setStyle(ButtonStyle.Link).setURL(logHelpUrl()),
       );
       await interaction.editReply({ content: issues.join('\n'), components: [row] });
       return;

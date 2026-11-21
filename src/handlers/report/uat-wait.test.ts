@@ -45,7 +45,7 @@ const mockForum = vi.mocked(getForum);
 const mockFrozen = vi.mocked(isFrozen);
 let finalizerFn: ReturnType<typeof vi.fn>;
 
-const COMMIT: CommitTip = { sha: 'a'.repeat(40), short: 'aaaaaaa', date: '2026-08-26T12:00:00Z', branch: 'Dom', repo: 'owner/main' };
+const COMMIT: CommitTip = { sha: 'a'.repeat(40), short: 'aaaaaaa', date: '2026-08-26T12:00:00Z', branch: 'testing', repo: 'owner/main' };
 const BASELINE = 'b'.repeat(40);
 
 function entry(overrides: Partial<CommitWaitEntry> = {}): CommitWaitEntry {
@@ -125,7 +125,7 @@ describe('commit event activation', () => {
     expect(thread.id).toBe('thread-1');
     expect(forum).toEqual({ id: 'forum-1' });
     expect(e.ticketId).toBe('42');
-    expect(commit).toMatchObject({ sha: COMMIT.sha, short: 'aaaaaaa', branch: 'Dom' });
+    expect(commit).toMatchObject({ sha: COMMIT.sha, short: 'aaaaaaa', branch: 'testing' });
     expect(Object.keys(await readCommitWaits())).toHaveLength(0);
   });
 

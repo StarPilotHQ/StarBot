@@ -25,8 +25,12 @@ export interface BotConfig {
   staffRole: string;
   scholarRole?: string;
   wikiRepo: string;
+  wikiUrl: string;
   wikiCacheDir: string;
+  projectName: string;
   mainRepo: string;
+  stableBranch: string;
+  testingBranch: string;
   githubToken?: string;
   uatWaitRepo?: string;
   uatWaitBranch?: string;
@@ -131,8 +135,12 @@ export function loadConfig(): BotConfig {
 
   const wikiRepo = process.env.WIKI_REPO || 'StarPilot-Docs/docs';
   const wikiCacheDir = process.env.WIKI_CACHE_DIR || 'data/wiki';
+  const wikiUrl = (process.env.WIKI_URL || 'https://wiki.firestar.link').replace(/\/+$/, '');
 
-  const mainRepo = process.env.MAIN_REPO || 'firestar5683/openpilot';
+  const projectName = process.env.PROJECT_NAME || 'StarPilot';
+  const mainRepo = process.env.MAIN_REPO || 'StarPilotHQ/StarPilot';
+  const stableBranch = process.env.STABLE_BRANCH || 'stable';
+  const testingBranch = process.env.TESTING_BRANCH || 'testing';
 
   const githubToken = process.env.GITHUB_TOKEN;
 
@@ -163,8 +171,12 @@ export function loadConfig(): BotConfig {
     staffRole,
     scholarRole,
     wikiRepo,
+    wikiUrl,
     wikiCacheDir,
+    projectName,
     mainRepo,
+    stableBranch,
+    testingBranch,
     githubToken,
     uatWaitRepo,
     uatWaitBranch,

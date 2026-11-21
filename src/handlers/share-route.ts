@@ -9,6 +9,7 @@ import {
   MessageFlags,
 } from 'discord.js';
 import { loadConfig } from '../config.js';
+import { logHelpUrl } from '../wiki/links.js';
 import { createLogger } from '../logger.js';
 import { createStore } from '../store.js';
 import { COLORS } from '../util.js';
@@ -259,7 +260,7 @@ async function processShareRoute(
         new ButtonBuilder()
           .setLabel('Need help?')
           .setStyle(ButtonStyle.Link)
-          .setURL('https://wiki.firestar.link/faq/#how-do-i-upload-logs-for-troubleshooting'),
+          .setURL(logHelpUrl()),
       );
 
       await interaction.editReply({
