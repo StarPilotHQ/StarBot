@@ -133,7 +133,7 @@ export function loadConfig(): BotConfig {
 
   const scholarRole = process.env.SCHOLAR_ROLE;
 
-  const wikiRepo = process.env.WIKI_REPO || 'StarPilot-Docs/docs';
+  const wikiRepo = process.env.WIKI_REPO || 'StarPilotHQ/docs';
   const wikiCacheDir = process.env.WIKI_CACHE_DIR || 'data/wiki';
   const wikiUrl = (process.env.WIKI_URL || 'https://wiki.firestar.link').replace(/\/+$/, '');
 
