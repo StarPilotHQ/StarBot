@@ -2,14 +2,12 @@ import type { Client, ThreadChannel } from 'discord.js';
 import { EmbedBuilder } from 'discord.js';
 import { createLogger } from '../../logger.js';
 import { COLORS } from '../../util.js';
-import { isRateLimit, retryDelay, STATUS_EMOJI } from './title-sync.js';
+import { isRateLimit, retryDelay, withCurrentBadge, withThreadLock } from './title-sync.js';
 import { StoredReport } from './report-store.js';
 import { ScheduledTimerIndex } from './scheduled-timer-index.js';
 import { isFrozen, snoozeAdjustedWake } from './freeze-state.js';
 
 const log = createLogger('snooze-scheduler');
-
-export const SNOOZE_EMOJI = STATUS_EMOJI['snoozed'];
 
 export const SNOOZE_DURATIONS: Record<string, number> = {
   '1d': 24 * 60 * 60 * 1000,
@@ -138,16 +136,20 @@ class SnoozeScheduler extends ScheduledTimerIndex<ScheduledSnooze> {
   }
 
   // Restores the pre-snooze tag set (re-adds OPEN, drops SNOOZED) and title.
-  // Restoring verbatim avoids re-deriving the status/ticket suffix. Best-effort:
+  // The saved title keeps its status; only the assignee badge is recomputed. Best-effort:
   // a bad tag id or a rename rate-limit never strands the report closed.
   private async applyThreadRestore(thread: ThreadChannel, entry: ScheduledSnooze, nameRetries: number): Promise<void> {
     if (entry.priorTagIds) {
       await thread.setAppliedTags(entry.priorTagIds).catch(err => this.log.warn({ err, threadId: thread.id }, 'failed to restore forum tags'));
     }
-    if (!entry.priorName || thread.name === entry.priorName) return;
+    const { priorName } = entry;
+    if (!priorName) return;
     for (let i = 0; i <= nameRetries; i++) {
       try {
-        await thread.setName(entry.priorName);
+        await withThreadLock(thread.id, async () => {
+          const desired = await withCurrentBadge(thread, priorName);
+          if (thread.name !== desired) await thread.setName(desired);
+        });
         return;
       } catch (err) {
         if (i < nameRetries && isRateLimit(err)) {

@@ -220,6 +220,7 @@ export async function submitReport(
       reporterId: params.reporterId,
       label: params.label,
       threadName: thread.name,
+      assigneeId: null,
       url: thread.url,
       tagNames: allTagNames,
       createdTimestamp: thread.createdTimestamp ?? Date.now(),

@@ -1,3 +1,5 @@
+import { joinBadge, splitBadge } from './report-title.js';
+
 // Report priority model: staff-classified 0 (highest) .. 5 (lowest), surfaced as
 // a forum tag ("Priority N") and an emoji in the thread title right after the
 // status color. Tickets without a priority have neither — the default state for
@@ -27,7 +29,7 @@ const PRIORITY_BY_EMOJI = new Map(
 
 /** Reads the priority emoji token right after the status emoji, if any. */
 export function priorityFromTitle(name: string): PriorityLevel | null {
-  const tokens = name.split(' ');
+  const tokens = splitBadge(name).body.split(' ');
   if (tokens.length < 2) return null;
   return PRIORITY_BY_EMOJI.get(tokens[1]) ?? null;
 }
@@ -46,17 +48,19 @@ export function priorityFromTags(tagNames: string[]): PriorityLevel | null {
 
 /** Removes the priority emoji token (and its trailing space), preserving the rest. */
 export function stripPriorityEmoji(name: string): string {
-  const tokens = name.split(' ');
+  const { badge, body } = splitBadge(name);
+  const tokens = body.split(' ');
   if (tokens.length < 2 || !PRIORITY_BY_EMOJI.has(tokens[1])) return name;
   const rest = tokens.slice(2);
-  return rest.length > 0 ? `${tokens[0]} ${rest.join(' ')}` : tokens[0];
+  return joinBadge(badge, rest.length > 0 ? `${tokens[0]} ${rest.join(' ')}` : tokens[0]);
 }
 
 /** Sets, replaces, or removes (null) the priority emoji after the status emoji. */
 export function setPriorityInTitle(name: string, priority: PriorityLevel | null): string {
-  const base = stripPriorityEmoji(name);
-  if (priority == null) return base;
+  const stripped = stripPriorityEmoji(name);
+  if (priority == null) return stripped;
+  const { badge, body: base } = splitBadge(stripped);
   const status = base.split(' ', 1)[0];
   const rest = base.slice(status.length).replace(/^ /, '');
-  return `${status} ${PRIORITY_EMOJIS[priority]}${rest ? ` ${rest}` : ''}`;
+  return joinBadge(badge, `${status} ${PRIORITY_EMOJIS[priority]}${rest ? ` ${rest}` : ''}`);
 }

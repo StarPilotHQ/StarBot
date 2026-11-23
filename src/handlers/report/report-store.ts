@@ -24,6 +24,17 @@ export interface StoredReportData {
   createdTimestamp: number;
   /** Last known activity (message) in the thread, ms epoch. */
   lastActivityAt: number;
+  assigneeId?: string | null;
+}
+
+const reportChains = new Map<string, Promise<unknown>>();
+
+function withReportLock<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
+  const run = (reportChains.get(threadId) ?? Promise.resolve()).then(fn);
+  const tail = run.then(() => undefined, () => undefined);
+  reportChains.set(threadId, tail);
+  void tail.then(() => { if (reportChains.get(threadId) === tail) reportChains.delete(threadId); });
+  return run;
 }
 
 // Serializes read-modify-write on the shared index keys across concurrent record() calls.
@@ -95,7 +106,11 @@ export class StoredReport {
 
   /** Creation hook. Index writes go through the chain so concurrent calls can't drop ids. */
   static async record(data: StoredReportData): Promise<StoredReport> {
-    await reportStore.set(data.threadId, data);
+    await withReportLock(data.threadId, async () => {
+      const stored = (await reportStore.get(data.threadId))?.assigneeId;
+      const assigneeId = data.assigneeId ?? (stored === undefined ? data.assigneeId : stored);
+      await reportStore.set(data.threadId, assigneeId === undefined ? data : { ...data, assigneeId });
+    });
     const run = indexChain.then(async () => {
       const ids = new Set((await userIndexStore.get(data.reporterId)) ?? []);
       ids.add(data.threadId);
@@ -126,27 +141,41 @@ export class StoredReport {
 
   /** Refreshes live-derived fields (name, tags) from the thread. */
   static async syncFromThread(thread: ThreadChannel): Promise<StoredReport | null> {
-    const existing = await StoredReport.get(thread.id);
-    if (!existing) return null;
-    const tagNames = await resolveTagNames(thread, existing.data.tagNames);
-    const updated: StoredReportData = {
-      ...existing.data,
-      threadName: thread.name,
-      url: thread.url,
-      tagNames,
-      lastActivityAt: Math.max(existing.data.lastActivityAt, thread.createdTimestamp ?? 0),
-    };
-    await reportStore.set(thread.id, updated);
-    return new StoredReport(updated);
+    return withReportLock(thread.id, async () => {
+      const existing = await StoredReport.get(thread.id);
+      if (!existing) return null;
+      const tagNames = await resolveTagNames(thread, existing.data.tagNames);
+      const updated: StoredReportData = {
+        ...existing.data,
+        threadName: thread.name,
+        url: thread.url,
+        tagNames,
+        lastActivityAt: Math.max(existing.data.lastActivityAt, thread.createdTimestamp ?? 0),
+      };
+      await reportStore.set(thread.id, updated);
+      return new StoredReport(updated);
+    });
   }
 
   /** Targeted patch hook for facts the thread object can't provide. */
   static async update(threadId: string, patch: Partial<StoredReportData>): Promise<StoredReport | null> {
-    const existing = await StoredReport.get(threadId);
-    if (!existing) return null;
-    const updated: StoredReportData = { ...existing.data, ...patch };
-    await reportStore.set(threadId, updated);
-    return new StoredReport(updated);
+    return withReportLock(threadId, async () => {
+      const existing = await StoredReport.get(threadId);
+      if (!existing) return null;
+      const updated: StoredReportData = { ...existing.data, ...patch };
+      await reportStore.set(threadId, updated);
+      return new StoredReport(updated);
+    });
+  }
+
+  static async seedAssignee(threadId: string, assigneeId: string | null): Promise<string | null> {
+    return withReportLock(threadId, async () => {
+      const data = await reportStore.get(threadId);
+      if (!data) return assigneeId;
+      if (data.assigneeId !== undefined) return data.assigneeId;
+      await reportStore.set(threadId, { ...data, assigneeId });
+      return assigneeId;
+    });
   }
 
   /** Close hook: keeps CLOSED in the tag list so `isActive` flips false. */
@@ -159,9 +188,12 @@ export class StoredReport {
 
   /** Delete hook: drops the report and its index entries once the thread no longer exists. */
   static async forget(threadId: string): Promise<boolean> {
-    const existing = await reportStore.get(threadId);
+    const existing = await withReportLock(threadId, async () => {
+      const data = await reportStore.get(threadId);
+      if (data) await reportStore.delete(threadId);
+      return data;
+    });
     if (!existing) return false;
-    await reportStore.delete(threadId);
     const run = indexChain.then(async () => {
       const ids = (await userIndexStore.get(existing.reporterId)) ?? [];
       await userIndexStore.set(existing.reporterId, ids.filter(id => id !== threadId));

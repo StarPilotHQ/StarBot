@@ -8,14 +8,7 @@ vi.mock('../../logger.js', () => ({
   createLogger: () => ({ warn: () => {}, error: () => {}, info: () => {}, debug: () => {} }),
 }));
 
-import { wakesField, snoozeDurationMs, SNOOZE_DURATIONS, DEFAULT_SNOOZE, SNOOZE_EMOJI } from './snooze-scheduler.js';
-
-describe('SNOOZE_EMOJI', () => {
-  it('is the snoozed status emoji (a single leading-title marker)', () => {
-    expect(typeof SNOOZE_EMOJI).toBe('string');
-    expect(SNOOZE_EMOJI.length).toBeGreaterThan(0);
-  });
-});
+import { wakesField, snoozeDurationMs, SNOOZE_DURATIONS, DEFAULT_SNOOZE } from './snooze-scheduler.js';
 
 describe('wakesField', () => {
   it('renders a relative Discord timestamp in seconds for the wake time', () => {

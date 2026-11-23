@@ -1,41 +1,40 @@
+import { randomUUID } from 'node:crypto';
 import type { Client, ThreadChannel } from 'discord.js';
+import { RESTJSONErrorCodes } from 'discord.js';
 import { createStore } from '../../store.js';
 import { createLogger } from '../../logger.js';
 import { stripPriorityEmoji } from './priority.js';
+import { STATUS_EMOJI, joinBadge, splitBadge, statusFromTitle, statusShowsBadge, stripLeadingEmoji, type ReportStatus } from './report-title.js';
+import { resolveBadge } from './assignee-badge.js';
+import { StoredReport } from './report-store.js';
+
+export { STATUS_EMOJI, stripLeadingEmoji, type ReportStatus };
 
 const log = createLogger('title-sync');
-
-export type ReportStatus = 'new' | 'fix-incoming' | 'waiting-for-dev' | 'waiting-for-user' | 'resolved' | 'closed' | 'snoozed';
-
-export const STATUS_EMOJI: Record<ReportStatus, string> = {
-  'new': '🟠',
-  'fix-incoming': '⚪',
-  'waiting-for-dev': '🔴',
-  'waiting-for-user': '🟣',
-  'resolved': '🟢',
-  'closed': '🔵',
-  'snoozed': '💤',
-};
-
-const LEGACY_TYPE_EMOJIS = ['🐛', '💬', '✨'];
-const KNOWN_TITLE_EMOJIS = [...Object.values(STATUS_EMOJI), ...LEGACY_TYPE_EMOJIS];
 
 const FALLBACK_RETRY_MS = 10 * 60 * 1000;
 const NON_RATE_LIMIT_RETRY_MS = 60 * 1000;
 const MAX_RATE_LIMIT_RETRIES = 10;
+const BADGE_DEBOUNCE_MS = 60 * 1000;
+const BADGE_BACKFILL_STAGGER_MS = 1_000;
+const SWEEP_INTERVAL_MS = 30 * 60 * 1000;
 const TITLE_INDEX_KEY = 'pending';
 
 // Stores the desired status, not a frozen title, so the worker recomputes against the
 // thread's current name at fire time. `close` persists so a restart still closes in order.
 interface PendingEntry {
-  status: ReportStatus;
+  status?: ReportStatus;
   close?: boolean;
+  rev?: string;
+  badge?: { dueAt: number; rev: string };
 }
 
 const titleStore = createStore<Record<string, PendingEntry>>('title-sync');
 
 const syncing = new Set<string>();
+const rekick = new Set<string>();
 let client: Client | null = null;
+let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
 // Shared by applyTitle, syncWorker, and close-scheduler's timer so they can't race
 // each other's thread renames against the 2-per-10-min sublimit. Hold it per REST
@@ -61,13 +60,6 @@ export function setReportCloseHandler(fn: (thread: ThreadChannel) => Promise<voi
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-export function stripLeadingEmoji(name: string): string {
-  for (const e of KNOWN_TITLE_EMOJIS) {
-    if (name.startsWith(e)) return name.slice(e.length);
-  }
-  return name;
 }
 
 export const MAX_TITLE_LEN = 100;
@@ -99,8 +91,9 @@ export function splitReportTitle(currentName: string, ticketId: string): ReportT
   const labelled = body.match(FIRST_LABEL_SPLIT_RE);
   if (labelled) return { prefix: labelled[1], title: labelled[2], suffix };
 
-  const stripped = stripLeadingEmoji(body);
-  const emoji = body.slice(0, body.length - stripped.length);
+  const { badge, body: unbadged } = splitBadge(body);
+  const stripped = stripLeadingEmoji(unbadged);
+  const emoji = joinBadge(badge, unbadged.slice(0, unbadged.length - stripped.length));
   // Keep any priority emoji in the prefix so renames never treat it as title text.
   const noPriority = stripPriorityEmoji(stripped);
   const priorityPart = stripped.slice(0, stripped.length - noPriority.length);
@@ -120,16 +113,46 @@ function ticketIdFor(thread: ThreadChannel): string {
   return String(parseInt(thread.id.slice(-7), 10));
 }
 
-export function computeStatusTitle(currentName: string, status: ReportStatus, ticketId: string): string {
+export function computeStatusTitle(
+  currentName: string,
+  status: ReportStatus,
+  ticketId: string,
+  badge: string | null | undefined = splitBadge(currentName).badge,
+): string {
   let base = stripLeadingEmoji(currentName);
   if (base.startsWith(' ')) base = base.slice(1);
-  let title = `${STATUS_EMOJI[status]} ${base}`;
+  const title = joinBadge(statusShowsBadge(status) ? badge : null, `${STATUS_EMOJI[status]} ${base}`);
   // Creation omits the (id) suffix to save a rename; add it on the first status change.
-  if (!/\(\d+\)\s*$/.test(title)) {
-    const suffix = ` (${ticketId})`;
-    title = `${truncateTitle(title, MAX_TITLE_LEN - suffix.length)}${suffix}`;
-  }
-  return title;
+  return fitTitle(TICKET_SUFFIX_RE.test(title) ? title : `${title} (${ticketId})`);
+}
+
+const TICKET_SUFFIX_RE = /\s*\(\d+\)\s*$/;
+
+export function fitTitle(title: string): string {
+  const suffix = title.match(TICKET_SUFFIX_RE)?.[0] ?? '';
+  const head = title.slice(0, title.length - suffix.length);
+  return `${truncateTitle(head, MAX_TITLE_LEN - suffix.length)}${suffix}`;
+}
+
+export function applyBadge(name: string, ticketId: string, badge: string | null | undefined): string {
+  const status = statusFromTitle(name);
+  if (!status || badge === undefined) return name;
+  const shown = statusShowsBadge(status) ? badge : null;
+  if (splitBadge(name).badge === shown) return name;
+  return computeStatusTitle(name, status, ticketId, badge);
+}
+
+export async function withCurrentBadge(thread: ThreadChannel, name: string): Promise<string> {
+  return applyBadge(name, ticketIdFor(thread), await resolveBadge(thread));
+}
+
+async function desiredTitle(thread: ThreadChannel, status: ReportStatus | undefined): Promise<{ name: string; badgeKnown: boolean }> {
+  const effective = status ?? statusFromTitle(thread.name);
+  const badge = effective && !statusShowsBadge(effective) ? null : await resolveBadge(thread);
+  const name = status
+    ? computeStatusTitle(thread.name, status, ticketIdFor(thread), badge)
+    : applyBadge(thread.name, ticketIdFor(thread), badge);
+  return { name, badgeKnown: badge !== undefined };
 }
 
 // A rate-limit rejection (discord.js RateLimitError) carries `timeToReset` and
@@ -138,6 +161,12 @@ export function computeStatusTitle(currentName: string, status: ReportStatus, ti
 export function isRateLimit(err: unknown): boolean {
   return err != null && typeof err === 'object'
     && 'timeToReset' in err && typeof (err as { timeToReset?: unknown }).timeToReset === 'number';
+}
+
+function isTransientRenameError(err: unknown): boolean {
+  const { code, status } = (err ?? {}) as { code?: unknown; status?: unknown };
+  if (typeof status === 'number' && status >= 500) return true;
+  return typeof code !== 'number' || code === RESTJSONErrorCodes.InvalidActionOnArchivedThread;
 }
 
 // Thread-name edits hit a 2-per-10-min sublimit whose true wait is in `retryAfter`
@@ -172,12 +201,28 @@ function mutateIndex<T>(fn: (index: Record<string, PendingEntry>) => T): Promise
   return run;
 }
 
-function persistEntry(threadId: string, entry: PendingEntry): Promise<void> {
-  return mutateIndex(index => { index[threadId] = entry; });
+function persistStatus(threadId: string, status: ReportStatus, close: boolean): Promise<void> {
+  return mutateIndex(index => {
+    index[threadId] = { ...index[threadId], status, close, rev: randomUUID() };
+  });
 }
 
-function clearEntry(threadId: string): Promise<void> {
-  return mutateIndex(index => { delete index[threadId]; });
+function settleEntry(threadId: string, seen: PendingEntry | undefined, done: { status?: boolean; badge?: boolean; retryBadge?: boolean }): Promise<void> {
+  return mutateIndex(index => {
+    const entry = index[threadId];
+    if (!entry) {
+      if (done.retryBadge) requestBadgeRefresh(index, threadId, Date.now() + BADGE_DEBOUNCE_MS);
+      return;
+    }
+    if (done.status && entry.rev === seen?.rev) {
+      delete entry.status;
+      delete entry.close;
+      delete entry.rev;
+    }
+    if (done.badge && entry.badge?.rev === seen?.badge?.rev) delete entry.badge;
+    if (done.retryBadge && !entry.badge) requestBadgeRefresh(index, threadId, Date.now() + BADGE_DEBOUNCE_MS);
+    if (!entry.status && !index[threadId].badge) delete index[threadId];
+  });
 }
 
 async function readEntry(threadId: string): Promise<PendingEntry | undefined> {
@@ -196,17 +241,20 @@ async function runClose(thread: ThreadChannel): Promise<void> {
 // Returns true when deferred to the background worker (rate-limited).
 async function applyTitle(thread: ThreadChannel, status: ReportStatus, close: boolean): Promise<boolean> {
   return withThreadLock(thread.id, async () => {
-    const desired = computeStatusTitle(thread.name, status, ticketIdFor(thread));
+    const pending = await readEntry(thread.id);
+    const { name: desired, badgeKnown } = await desiredTitle(thread, status);
+    let renamed = true;
 
     if (thread.name !== desired) {
       try {
         await thread.setName(desired);
       } catch (err) {
         if (isRateLimit(err)) {
-          await persistEntry(thread.id, { status, close });
+          await persistStatus(thread.id, status, close);
           kickWorker(thread);
           return true;
         }
+        renamed = false;
         log.warn({ err, threadId: thread.id }, 'title rename failed (non-rate-limit); leaving title unchanged');
       }
     }
@@ -216,7 +264,7 @@ async function applyTitle(thread: ThreadChannel, status: ReportStatus, close: bo
         await runClose(thread);
       } catch (err) {
         if (isRateLimit(err)) {
-          await persistEntry(thread.id, { status, close: true });
+          await persistStatus(thread.id, status, true);
           kickWorker(thread);
           return true;
         }
@@ -224,7 +272,8 @@ async function applyTitle(thread: ThreadChannel, status: ReportStatus, close: bo
       }
     }
 
-    await clearEntry(thread.id);
+    await settleEntry(thread.id, pending, { status: true, badge: badgeKnown && renamed, retryBadge: !badgeKnown });
+    if (!badgeKnown) kickWorker(thread);
     return false;
   });
 }
@@ -238,7 +287,10 @@ function kickWorker(thread: ThreadChannel): void {
 // On non-rate-limit errors, logs and gives up - once past the first attempt
 // there's nothing actionable to surface to the user.
 async function syncWorker(thread: ThreadChannel): Promise<void> {
-  if (syncing.has(thread.id)) return;
+  if (syncing.has(thread.id)) {
+    rekick.add(thread.id);
+    return;
+  }
   syncing.add(thread.id);
   try {
     let rateLimitRetries = 0;
@@ -249,45 +301,72 @@ async function syncWorker(thread: ThreadChannel): Promise<void> {
       // If a pending close already landed (thread archived) but we crashed before
       // clearing it, treat it as done - re-editing would unarchive a closed report.
       if (entry.close && thread.archived) {
-        await clearEntry(thread.id);
-        break;
+        await settleEntry(thread.id, entry, { status: true, badge: true });
+        continue;
       }
 
+      if (!entry.status && thread.archived) {
+        const report = await StoredReport.get(thread.id);
+        if (report?.isActive && report.category !== 'Snoozed') {
+          const { name, badgeKnown } = await desiredTitle(thread, undefined);
+          if (!badgeKnown || name !== thread.name) break;
+        }
+        await settleEntry(thread.id, entry, { badge: true });
+        continue;
+      }
+
+      const wait = entry.status ? 0 : (entry.badge?.dueAt ?? 0) - Date.now();
+      if (wait > 0) {
+        await sleep(wait);
+        continue;
+      }
+
+      let badgeKnown = true;
+      let retryRename = false;
+      let ran = false;
       try {
         await withThreadLock(thread.id, async () => {
-          const desired = computeStatusTitle(thread.name, entry.status, ticketIdFor(thread));
-          if (thread.name !== desired) {
+          const current = await readEntry(thread.id);
+          if (current?.rev !== entry.rev || current?.badge?.rev !== entry.badge?.rev) return;
+          if (!entry.status && thread.archived) return;
+          ran = true;
+          const desired = await desiredTitle(thread, entry.status);
+          badgeKnown = desired.badgeKnown;
+          if (thread.name !== desired.name) {
             try {
-              await thread.setName(desired);
+              await thread.setName(desired.name);
             } catch (err) {
               if (isRateLimit(err)) throw err;
-              log.warn({ err, threadId: thread.id }, 'deferred rename failed (non-rate-limit); closing without it');
+              retryRename = isTransientRenameError(err);
+              log.warn({ err, threadId: thread.id }, 'deferred rename failed (non-rate-limit); leaving title unchanged');
             }
           }
           if (entry.close) await runClose(thread);
         });
+        if (!ran) continue;
+        rateLimitRetries = 0;
       } catch (err) {
         if (isRateLimit(err)) {
           if (++rateLimitRetries > MAX_RATE_LIMIT_RETRIES) {
             log.warn({ threadId: thread.id, rateLimitRetries }, 'title sync exhausted rate-limit retries; abandoning');
-            await clearEntry(thread.id);
+            await settleEntry(thread.id, entry, { status: true, badge: true });
             break;
           }
-          const wait = retryDelay(err);
-          log.warn({ err, threadId: thread.id, waitMs: wait, rateLimitRetries }, 'title sync deferred (rate limit); will retry');
-          await sleep(wait);
+          const retryIn = retryDelay(err);
+          log.warn({ err, threadId: thread.id, waitMs: retryIn, rateLimitRetries }, 'title sync deferred (rate limit); will retry');
+          await sleep(retryIn);
           continue;
         }
         log.warn({ err, threadId: thread.id }, 'deferred title sync failed (non-rate-limit); abandoning');
-        await clearEntry(thread.id);
-        break;
       }
 
-      await clearEntry(thread.id);
-      break;
+      const badgeDone = badgeKnown && !(retryRename && entry.badge);
+      await settleEntry(thread.id, entry, { status: true, badge: badgeDone, retryBadge: !badgeKnown });
+      if (!badgeDone) break;
     }
   } finally {
     syncing.delete(thread.id);
+    if (rekick.delete(thread.id)) kickWorker(thread);
   }
 }
 
@@ -305,7 +384,7 @@ export async function tryStatusClose(
   status: ReportStatus,
 ): Promise<{ done: true } | { done: false; retryMs: number; rateLimited: boolean }> {
   try {
-    const desired = computeStatusTitle(thread.name, status, ticketIdFor(thread));
+    const { name: desired } = await desiredTitle(thread, status);
     if (thread.name !== desired) {
       try {
         await thread.setName(desired);
@@ -323,26 +402,50 @@ export async function tryStatusClose(
   }
 }
 
-export function initTitleSync(c: Client): void {
-  client = c;
-  void recoverPending();
+function requestBadgeRefresh(index: Record<string, PendingEntry>, threadId: string, dueAt: number): void {
+  index[threadId] = { ...index[threadId], badge: { dueAt, rev: randomUUID() } };
 }
 
-async function recoverPending(): Promise<void> {
+export async function scheduleBadgeSync(thread: ThreadChannel): Promise<void> {
+  const notBefore = Date.now() + BADGE_DEBOUNCE_MS;
+  await mutateIndex(index => requestBadgeRefresh(index, thread.id, notBefore));
+  kickWorker(thread);
+}
+
+export async function scheduleBadgeBackfill(threadIds: string[]): Promise<void> {
+  const start = Date.now();
+  await mutateIndex(index => {
+    threadIds.forEach((id, i) => requestBadgeRefresh(index, id, start + i * BADGE_BACKFILL_STAGGER_MS));
+  });
+  void sweepPending();
+}
+
+export function initTitleSync(c: Client): void {
+  client = c;
+  void sweepPending();
+  if (sweepTimer) clearInterval(sweepTimer);
+  sweepTimer = setInterval(() => { void sweepPending(); }, SWEEP_INTERVAL_MS).unref();
+}
+
+async function sweepPending(): Promise<void> {
   if (!client) return;
-  const ids = Object.keys(await readIndex());
-  if (ids.length === 0) return;
-  log.info(`Recovering ${ids.length} pending title change(s)`);
-  for (const threadId of ids) {
-    try {
-      const ch = await client.channels.fetch(threadId).catch(() => null);
-      if (ch && ch.isThread()) {
-        kickWorker(ch);
-      } else {
-        await clearEntry(threadId);
+  try {
+    const index = await readIndex();
+    for (const threadId of Object.keys(index)) {
+      if (syncing.has(threadId)) continue;
+      try {
+        const ch = await client.channels.fetch(threadId);
+        if (ch?.isThread()) kickWorker(ch);
+        else await settleEntry(threadId, index[threadId], { status: true, badge: true });
+      } catch (err) {
+        if ((err as { code?: unknown } | null)?.code === RESTJSONErrorCodes.UnknownChannel) {
+          await settleEntry(threadId, index[threadId], { status: true, badge: true });
+        } else {
+          log.warn({ err, threadId }, 'could not fetch thread for pending title; will retry');
+        }
       }
-    } catch (err) {
-      log.warn({ err, threadId }, 'failed to recover pending title');
     }
+  } catch (err) {
+    log.warn({ err }, 'pending title sweep failed');
   }
 }

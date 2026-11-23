@@ -1,4 +1,4 @@
-import { Discord, ButtonComponent, ModalComponent, SelectMenuComponent, Slash, SlashGroup, Guild, ContextMenu } from 'discordx';
+import { Discord, ButtonComponent, ModalComponent, SelectMenuComponent, Slash, SlashGroup, Guild, ContextMenu, SlashOption } from 'discordx';
 import type { CommandInteraction, StringSelectMenuInteraction, ActionRow, MessageActionRowComponent, MessageContextMenuCommandInteraction } from 'discord.js';
 import {
   type ButtonInteraction,
@@ -6,6 +6,8 @@ import {
   type ThreadChannel,
   type ForumChannel,
   type Message,
+  type User,
+  ApplicationCommandOptionType,
   ApplicationCommandType,
   ComponentType,
   GuildMember,
@@ -44,14 +46,19 @@ import {
   composeReportTitle,
   computeStatusTitle,
   maxRenameLength,
-  truncateTitle,
   MAX_TITLE_LEN,
+  fitTitle,
+  withCurrentBadge,
+  scheduleBadgeSync,
+  scheduleBadgeBackfill,
 } from './title-sync.js';
 import { scheduleClose, getScheduledClose, nextCloseAt, closingNoticeField, cancelCloseRow, cancelScheduledClose, stripClosingNoticeFrom } from './close-scheduler.js';
 import { watchCommit, cancelCommitWatch, hasCommitWatch, setCommitWaitFinalizer } from './uat-wait.js';
 import { waitBranchConfigured, getLastSeenSha } from './commit-watcher.js';
 import { StoredReport } from './report-store.js';
 import { PRIORITY_EMOJIS, PRIORITY_LEVELS, PRIORITY_TAG_NAMES, priorityFromTags, priorityFromTitle, setPriorityInTitle, type PriorityLevel } from './priority.js';
+import { splitBadge } from './report-title.js';
+import { ASSIGNEE_FIELD, claimAssigneeEmoji, clearAssigneeEmoji, parseAssigneeEmoji, reportsNeedingBadgeSync } from './assignee-badge.js';
 import { getFreeze } from './freeze-state.js';
 import { fixedButtonLabel, fixedModalTitle, labelForThread, reportNoun } from './report-copy.js';
 import {
@@ -63,7 +70,6 @@ import {
   wakesField,
   snoozeDurationMs,
   DEFAULT_SNOOZE,
-  SNOOZE_EMOJI,
 } from './snooze-scheduler.js';
 import { queueVikunjaEmbedComment, queueVikunjaRelation, queueVikunjaSync } from '../../integrations/vikunja/sync.js';
 
@@ -122,28 +128,45 @@ export function canRenameThread(member: GuildMember): boolean {
   return hasStaffRole(member) || hasScholarRole(member);
 }
 
-export async function setReportAssignee(
+export function setReportAssignee(
   thread: ThreadChannel,
   guild: import('discord.js').Guild,
   assignee: { userId: string; username: string } | null,
-): Promise<void> {
-  if (assignee) {
-    await thread.members.add(assignee.userId).catch(err => log.warn({ err }, 'Failed to add member to thread'));
-  }
+): Promise<boolean> {
+  return withThreadLock(`assignee:${thread.id}`, () => applyReportAssignee(thread, guild, assignee));
+}
 
+async function applyReportAssignee(
+  thread: ThreadChannel,
+  guild: import('discord.js').Guild,
+  assignee: { userId: string; username: string } | null,
+): Promise<boolean> {
   const starter = await thread.fetchStarterMessage();
   const embed = starter?.embeds[0];
   if (starter && embed) {
     const updated = EmbedBuilder.from(embed);
-    const idx = embed.fields?.findIndex(f => f.name === '👤 Assigned to') ?? -1;
+    const idx = embed.fields?.findIndex(f => f.name === ASSIGNEE_FIELD) ?? -1;
     if (assignee) {
-      const field = { name: '👤 Assigned to', value: `<@${assignee.userId}>` };
+      const field = { name: ASSIGNEE_FIELD, value: `<@${assignee.userId}>` };
       if (idx >= 0) updated.spliceFields(idx, 1, field);
       else updated.addFields(field);
     } else if (idx >= 0) {
       updated.spliceFields(idx, 1);
     }
-    await starter.edit({ embeds: [updated] }).catch(() => {});
+    await StoredReport.update(thread.id, { assigneeId: undefined });
+    await scheduleBadgeSync(thread);
+    try {
+      await starter.edit({ embeds: [updated] });
+    } catch (err) {
+      log.warn({ err, threadId: thread.id }, 'Failed to update assignee on starter embed');
+      return false;
+    }
+  }
+  await StoredReport.update(thread.id, { assigneeId: assignee?.userId ?? null });
+  await scheduleBadgeSync(thread);
+
+  if (assignee) {
+    await thread.members.add(assignee.userId).catch(err => log.warn({ err }, 'Failed to add member to thread'));
   }
 
   const forum = await getForum(guild, loadConfig().forumChannelId);
@@ -161,6 +184,7 @@ export async function setReportAssignee(
       await thread.setAppliedTags(existing).catch(() => {});
     }
   }
+  return true;
 }
 
 const RENAME_OPTION = { label: 'Rename Thread', value: 'rename', emoji: '✏️', description: "Change this report thread's title" };
@@ -726,7 +750,7 @@ export async function renameReportThread(
 
   // Compute under the existing title lock so status changes cannot be clobbered.
   const outcome = await withThreadLock(thread.id, async () => {
-    const desired = composeReportTitle(splitReportTitle(thread.name, ticketId), title);
+    const desired = await withCurrentBadge(thread, composeReportTitle(splitReportTitle(thread.name, ticketId), title));
     if (thread.name === desired) return { noop: true as const };
     await thread.setName(desired);
     return { noop: false as const, name: desired };
@@ -1598,8 +1622,10 @@ export class BotReportActions {
     }
 
     if (fromMessage) await interaction.deleteReply().catch(() => {});
-    await setReportAssignee(thread, guild, { userId: target.id, username: target.username });
-    await respond(`Assigned <@${target.id}> to this report.`);
+    const assigned = await setReportAssignee(thread, guild, { userId: target.id, username: target.username });
+    await respond(assigned
+      ? `Assigned <@${target.id}> to this report.`
+      : 'Could not update this report - it may be snoozed or archived. Reopen it and try again.');
   }
 
   @ModalComponent({ id: /^rename_modal_/ })
@@ -1741,7 +1767,7 @@ export class BotReportActions {
     let rateLimitErr: unknown;
     try {
       await withThreadLock(thread.id, async () => {
-        const desired = truncateTitle(setPriorityInTitle(thread.name, priority), MAX_TITLE_LEN);
+        const desired = fitTitle(await withCurrentBadge(thread, setPriorityInTitle(thread.name, priority)));
         if (thread.name !== desired) await thread.setName(desired);
       });
     } catch (err) {
@@ -1838,7 +1864,7 @@ export class BotReportActions {
       )
       .setTimestamp();
 
-    const splitName = `✂️ Split - ${thread.name}`;
+    const splitName = `✂️ Split - ${splitBadge(thread.name).body}`;
     const threadName = splitName.length > 100 ? splitName.slice(0, 97) + '\u2026' : splitName;
 
     const newThread = await forum.threads.create({
@@ -1859,6 +1885,7 @@ export class BotReportActions {
         reporterId: splitSubmitter,
         label: 'Split',
         threadName: newThread.name,
+        assigneeId: null,
         url: newThread.url,
         tagNames: (newThread.appliedTags as string[]).map(id => splitTagNameById.get(id) ?? ''),
         createdTimestamp: newThread.createdTimestamp ?? Date.now(),
@@ -2027,11 +2054,13 @@ export class BotReportActions {
     }
 
     // Flag the snoozed state in the forum list via the title emoji.
-    const base = stripLeadingEmoji(thread.name).replace(/^ /, '');
-    const snoozedName = `${SNOOZE_EMOJI} ${base}`.slice(0, 100);
-    if (thread.name !== snoozedName) {
-      await thread.setName(snoozedName).catch(err => log.warn({ err }, 'Failed to rename thread for snooze'));
-    }
+    await withThreadLock(thread.id, async () => {
+      const snoozedName = await withCurrentBadge(
+        thread,
+        computeStatusTitle(thread.name, 'snoozed', String(parseInt(thread.id.slice(-7), 10))),
+      );
+      if (thread.name !== snoozedName) await thread.setName(snoozedName);
+    }).catch(err => log.warn({ err }, 'Failed to rename thread for snooze'));
 
     const embed = new EmbedBuilder()
       .setColor(COLORS.amber)
@@ -2185,6 +2214,70 @@ export class ReportCommands {
     }
 
     await interaction.reply(buildStaffActionsReply(ticketId, !hasStaffRole(interaction.member)));
+  }
+
+  @Slash({ description: 'Set the emoji shown on reports assigned to you or another staff member', name: 'assignee-emoji' })
+  async assigneeEmojiCommand(
+    @SlashOption({
+      name: 'emoji',
+      description: 'One standard emoji, or "none" to remove it',
+      required: true,
+      type: ApplicationCommandOptionType.String,
+    })
+    input: string,
+    @SlashOption({
+      name: 'user',
+      description: 'Staff member to change (defaults to you)',
+      required: false,
+      type: ApplicationCommandOptionType.User,
+    })
+    user: User | GuildMember | undefined,
+    interaction: CommandInteraction,
+  ) {
+    if (!(interaction.member instanceof GuildMember) || !hasStaffRole(interaction.member)) {
+      await interaction.reply({ content: 'Only staff can set assignee emojis.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+    const { guild } = interaction;
+    if (!guild) {
+      await interaction.reply({ content: 'Could not resolve guild.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const respond = (content: string) => interaction.editReply({ content, allowedMentions: { parse: [] } });
+    const targetId = user?.id ?? interaction.user.id;
+
+    let result: string;
+    if (input.trim().toLowerCase() === 'none') {
+      result = await clearAssigneeEmoji(targetId)
+        ? `Removed the assignee emoji for <@${targetId}>.`
+        : `<@${targetId}> has no assignee emoji set.`;
+    } else {
+      const parsed = parseAssigneeEmoji(input);
+      if (!parsed.ok) {
+        await respond(parsed.reason === 'reserved'
+          ? 'That emoji already marks a status, priority or report type - pick another one.'
+          : 'Enter exactly one standard emoji, or `none`. Custom server emojis do not work in thread titles.');
+        return;
+      }
+      const target = await guild.members.fetch(targetId).catch(() => null);
+      if (!target || !hasStaffRole(target)) {
+        await respond(`<@${targetId}> doesn't have the staff role and can't be assigned reports.`);
+        return;
+      }
+      const holder = await claimAssigneeEmoji(targetId, parsed.emoji);
+      if (holder) {
+        await respond(`${parsed.emoji} is already used by <@${holder}>.`);
+        return;
+      }
+      result = `Assignee emoji for <@${targetId}> set to ${parsed.emoji}.`;
+    }
+
+    const threadIds = await reportsNeedingBadgeSync(targetId);
+    await scheduleBadgeBackfill(threadIds);
+    log.info({ userId: interaction.user.id, targetId, queued: threadIds.length }, 'Assignee emoji changed');
+    await respond(`${result} Open assigned reports will update shortly; recently renamed ones can take 10 minutes or so, and inactive posts update once they're unarchived.`);
   }
 }
 
