@@ -33,7 +33,7 @@ import { normalizeRouteInput, parseNormalizedRoute, parseRouteComponents, valida
 import { randomUUID } from 'node:crypto';
 import { fetchCommitChoices, type CommitChoice } from '../../github.js';
 import { getForum, addAdditionalRoutesToTracker, createRouteTrackerThread, routeNumberLabel, TRACKER_FIELD_PREFIX } from './route-tracker.js';
-import { resolveTagIds, buildActionRow, buildDonateRow, swapForumTags, ensureForumTag } from './report-service.js';
+import { resolveTagIds, buildActionRow, buildDonateRow, swapForumTags } from './report-service.js';
 import {
   setThreadStatusEmoji,
   setThreadStatusAndClose,
@@ -58,7 +58,9 @@ import { waitBranchConfigured, getLastSeenSha } from './commit-watcher.js';
 import { StoredReport } from './report-store.js';
 import { PRIORITY_EMOJIS, PRIORITY_LEVELS, PRIORITY_TAG_NAMES, priorityFromTags, priorityFromTitle, setPriorityInTitle, type PriorityLevel } from './priority.js';
 import { splitBadge } from './report-title.js';
-import { ASSIGNEE_FIELD, claimAssigneeEmoji, clearAssigneeEmoji, parseAssigneeEmoji, reportsNeedingBadgeSync } from './assignee-badge.js';
+import { ASSIGNEE_FIELD, assigneeField, assigneeIdFromFields, claimAssigneeEmoji, clearAssigneeEmoji, parseAssigneeEmoji, reportsNeedingBadgeSync } from './assignee-badge.js';
+import { ensureForumTag } from './forum-tags.js';
+import { addAssigneeTags, resolveAssigneeTagId, type Assignee } from './assignee-tags.js';
 import { getFreeze } from './freeze-state.js';
 import { fixedButtonLabel, fixedModalTitle, labelForThread, reportNoun } from './report-copy.js';
 import {
@@ -74,37 +76,6 @@ import {
 import { queueVikunjaEmbedComment, queueVikunjaRelation, queueVikunjaSync } from '../../integrations/vikunja/sync.js';
 
 const log = createLogger('report-actions');
-
-const assigneeTagStore = createStore<string>('assignee-tags');
-
-async function getOrCreateAssigneeTag(forum: import('discord.js').ForumChannel, userId: string, username: string): Promise<string | null> {
-  const cached = await assigneeTagStore.get(userId);
-  if (cached) {
-    if (forum.availableTags.some(t => t.id === cached)) return cached;
-    await assigneeTagStore.delete(userId);
-  }
-
-  const tagName = `Assignee ${username}`;
-  const existing = forum.availableTags.find(t => t.name === tagName);
-  if (existing) {
-    await assigneeTagStore.set(userId, existing.id);
-    return existing.id;
-  }
-
-  try {
-    const updated = await forum.setAvailableTags([
-      ...forum.availableTags.map(t => ({ name: t.name, id: t.id, moderated: t.moderated, emoji: t.emoji ?? undefined })),
-      { name: tagName },
-    ]);
-    const created = updated.availableTags.find(t => t.name === tagName);
-    if (!created) return null;
-    await assigneeTagStore.set(userId, created.id);
-    return created.id;
-  } catch (err) {
-    log.warn({ err, tagName }, 'Failed to create assignee tag');
-    return null;
-  }
-}
 
 function repoOwner(repo: string): string {
   return repo.split('/')[0];
@@ -131,7 +102,7 @@ export function canRenameThread(member: GuildMember): boolean {
 export function setReportAssignee(
   thread: ThreadChannel,
   guild: import('discord.js').Guild,
-  assignee: { userId: string; username: string } | null,
+  assignee: Assignee | null,
 ): Promise<boolean> {
   return withThreadLock(`assignee:${thread.id}`, () => applyReportAssignee(thread, guild, assignee));
 }
@@ -139,15 +110,15 @@ export function setReportAssignee(
 async function applyReportAssignee(
   thread: ThreadChannel,
   guild: import('discord.js').Guild,
-  assignee: { userId: string; username: string } | null,
+  assignee: Assignee | null,
 ): Promise<boolean> {
-  const starter = await thread.fetchStarterMessage();
+  const starter = await thread.fetchStarterMessage({ force: true });
   const embed = starter?.embeds[0];
   if (starter && embed) {
     const updated = EmbedBuilder.from(embed);
     const idx = embed.fields?.findIndex(f => f.name === ASSIGNEE_FIELD) ?? -1;
     if (assignee) {
-      const field = { name: ASSIGNEE_FIELD, value: `<@${assignee.userId}>` };
+      const field = assigneeField(assignee.userId);
       if (idx >= 0) updated.spliceFields(idx, 1, field);
       else updated.addFields(field);
     } else if (idx >= 0) {
@@ -171,18 +142,13 @@ async function applyReportAssignee(
 
   const forum = await getForum(guild, loadConfig().forumChannelId);
   if (forum) {
+    const assigneeTagId = assignee ? await resolveAssigneeTagId(forum, assignee) : null;
     const assigneeTagIds = new Set(forum.availableTags.filter(t => t.name.startsWith('Assignee ')).map(t => t.id));
     const assignedTagIds = new Set(resolveTagIds(forum, ['ASSIGNED']));
     const existing = (thread.appliedTags as string[]).filter(
       id => !assigneeTagIds.has(id) && !assignedTagIds.has(id),
     );
-    if (assignee) {
-      const assigneeTagId = await getOrCreateAssigneeTag(forum, assignee.userId, assignee.username);
-      const addTagIds = [...assignedTagIds, ...(assigneeTagId ? [assigneeTagId] : [])];
-      await thread.setAppliedTags([...existing, ...addTagIds]).catch(() => {});
-    } else {
-      await thread.setAppliedTags(existing).catch(() => {});
-    }
+    await thread.setAppliedTags(assignee ? addAssigneeTags(forum, existing, assigneeTagId) : existing).catch(() => {});
   }
   return true;
 }
@@ -1622,7 +1588,10 @@ export class BotReportActions {
     }
 
     if (fromMessage) await interaction.deleteReply().catch(() => {});
-    const assigned = await setReportAssignee(thread, guild, { userId: target.id, username: target.username });
+    const assigned = await setReportAssignee(thread, guild, { userId: target.id, username: target.username }).catch(err => {
+      log.warn({ err, threadId: thread.id }, 'Failed to assign report');
+      return false;
+    });
     await respond(assigned
       ? `Assigned <@${target.id}> to this report.`
       : 'Could not update this report - it may be snoozed or archived. Reopen it and try again.');
@@ -1863,6 +1832,8 @@ export class BotReportActions {
         { name: '\u200B', value: `[Original Report \u2192](${starter.url})` },
       )
       .setTimestamp();
+    const assigneeId = assigneeIdFromFields(opEmbed.fields);
+    if (assigneeId) splitEmbed.addFields(assigneeField(assigneeId));
 
     const splitName = `✂️ Split - ${splitBadge(thread.name).body}`;
     const threadName = splitName.length > 100 ? splitName.slice(0, 97) + '\u2026' : splitName;
@@ -1885,12 +1856,16 @@ export class BotReportActions {
         reporterId: splitSubmitter,
         label: 'Split',
         threadName: newThread.name,
-        assigneeId: null,
+        assigneeId,
         url: newThread.url,
         tagNames: (newThread.appliedTags as string[]).map(id => splitTagNameById.get(id) ?? ''),
         createdTimestamp: newThread.createdTimestamp ?? Date.now(),
         lastActivityAt: Date.now(),
       });
+    }
+
+    if (assigneeId) {
+      await newThread.members.add(assigneeId).catch(err => log.warn({ err }, 'Failed to add assignee to split thread'));
     }
 
     const splitStarter = await newThread.fetchStarterMessage();
@@ -1902,17 +1877,19 @@ export class BotReportActions {
     queueVikunjaSync(newThread);
     queueVikunjaRelation(newThread, thread);
 
-    const updatedEmbed = EmbedBuilder.from(opEmbed);
-    const origPostIdx = opEmbed.fields?.findIndex(
-      f => f.name === 'Original Post' || ('value' in f && (f.value as string)?.startsWith('[Original Post \u2192]')),
-    ) ?? -1;
-    const splitField = { name: '✂️ Split', value: `[${newThread.name}](${newThread.url})`, inline: true };
-    if (origPostIdx >= 0) {
-      updatedEmbed.spliceFields(origPostIdx, 0, splitField);
-    } else {
-      updatedEmbed.addFields(splitField);
-    }
-    await starter.edit({ embeds: [updatedEmbed] }).catch(err => log.warn({ err }, 'Failed to edit OP embed'));
+    await withThreadLock(`assignee:${thread.id}`, async () => {
+      const liveStarter = await thread.fetchStarterMessage({ force: true });
+      const liveEmbed = liveStarter?.embeds[0];
+      if (!liveStarter || !liveEmbed) return;
+      const updatedEmbed = EmbedBuilder.from(liveEmbed);
+      const origPostIdx = liveEmbed.fields?.findIndex(
+        f => f.name === 'Original Post' || f.value?.startsWith('[Original Post \u2192]'),
+      ) ?? -1;
+      const splitField = { name: '✂️ Split', value: `[${newThread.name}](${newThread.url})`, inline: true };
+      if (origPostIdx >= 0) updatedEmbed.spliceFields(origPostIdx, 0, splitField);
+      else updatedEmbed.addFields(splitField);
+      await liveStarter.edit({ embeds: [updatedEmbed] });
+    }).catch(err => log.warn({ err }, 'Failed to edit OP embed'));
 
     const updatedAdditionalEmbed = EmbedBuilder.from(additionalEmbed!);
     updatedAdditionalEmbed.addFields({ name: '✂️ Split to', value: `[${newThread.name}](${newThread.url})`, inline: true });

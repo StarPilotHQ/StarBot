@@ -12,6 +12,7 @@ const root = new KeyvSqlite({ uri: `sqlite://${storePath}`, driver: 'better-sqli
 
 export interface StoreOptions {
   ttl?: number;
+  throwOnErrors?: boolean;
 }
 
 export interface Store<T> {
@@ -21,7 +22,7 @@ export interface Store<T> {
 }
 
 export function createStore<T>(namespace: string, options: StoreOptions = {}): Store<T> {
-  const keyv = new Keyv<T>({ store: root, ttl: options.ttl });
+  const keyv = new Keyv<T>({ store: root, ttl: options.ttl, throwOnErrors: options.throwOnErrors });
   keyv.on('error', err => log.error({ err }, `Keyv store error in namespace "${namespace}"`));
   // The shared sqlite adapter ignores Keyv's namespace, so same-key stores (e.g. two
   // using 'pending') collide unless we prefix the key with the namespace ourselves.

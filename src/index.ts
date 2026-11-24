@@ -9,6 +9,7 @@ import './handlers/report/index.js';
 import './handlers/report/report-actions.js';
 import './handlers/report/backfill.js';
 import './handlers/report/freeze.js';
+import './handlers/report/default-assignee-command.js';
 import './handlers/share-route.js';
 import './integrations/vikunja/events.js';
 

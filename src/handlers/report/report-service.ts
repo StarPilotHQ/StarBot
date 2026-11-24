@@ -14,7 +14,12 @@ import { getForum, createRouteTrackerThread, addAdditionalRoutesToTracker, encod
 import { StoredReport } from './report-store.js';
 import { activeCapMessage, checkActiveCap } from './active-cap.js';
 import { isFrozen } from './freeze-state.js';
-import { STATUS_EMOJI, isRateLimit } from './title-sync.js';
+import { STATUS_EMOJI, fitTitle, isRateLimit, scheduleBadgeSync, withThreadLock } from './title-sync.js';
+import { joinBadge } from './report-title.js';
+import { ASSIGNEE_FIELD, assigneeField, assigneeIdFromFields, badgeForAssignee } from './assignee-badge.js';
+import { ensureForumTag } from './forum-tags.js';
+import { fitPostTags, withAssigneeTags } from './assignee-tags.js';
+import { resolveDefaultAssignee } from './default-assignee.js';
 import { PRIORITY_EMOJIS, DEFAULT_BUG_PRIORITY } from './priority.js';
 import type { ExtractedRoute, RouteValidation } from '../../comma.js';
 import { queueVikunjaSync } from '../../integrations/vikunja/sync.js';
@@ -41,19 +46,6 @@ export function resolveTagIds(forum: ForumChannel, names: string[]): string[] {
   return names
     .map(name => forum.availableTags.find(t => t.name === name)?.id)
     .filter((id): id is string => id != null);
-}
-
-/** Returns the forum with the tag present, creating it if missing. Best-effort. */
-export async function ensureForumTag(forum: ForumChannel, name: string): Promise<ForumChannel> {
-  if (forum.availableTags.some(t => t.name === name)) return forum;
-  const updated = await forum.setAvailableTags([
-    ...forum.availableTags.map(t => ({ name: t.name, id: t.id, moderated: t.moderated, emoji: t.emoji ?? undefined })),
-    { name },
-  ]).catch((err: unknown) => {
-    log.warn({ err, name }, 'Failed to create forum tag');
-    return null;
-  });
-  return updated ?? forum;
 }
 
 export function buildActionRow(ticketId: string): ActionRowBuilder<ButtonBuilder> {
@@ -101,7 +93,7 @@ export async function swapForumTags(
     return !tag || !removeNames.has(tag.name);
   });
   const addIds = opts.add ? resolveTagIds(forum, opts.add) : [];
-  await thread.setAppliedTags([...new Set([...keep, ...addIds])]).catch((err: unknown) => {
+  await thread.setAppliedTags(fitPostTags(forum, [...keep, ...addIds])).catch((err: unknown) => {
     // Rate-limits must propagate so close paths can defer + retry (see closeThread).
     if (isRateLimit(err)) throw err;
     log.warn({ err }, 'Failed to swap forum tags');
@@ -136,6 +128,19 @@ async function addWikiSuggestions(embed: EmbedBuilder, query: string): Promise<v
   } catch (err) {
     log.error({ err }, 'Failed to fetch wiki suggestions');
   }
+}
+
+function carryOverAssignee(embed: EmbedBuilder, liveFields: ReadonlyArray<{ name: string; value: string }>): void {
+  const others = (embed.data.fields ?? []).filter(f => f.name !== ASSIGNEE_FIELD);
+  const live = liveFields.filter(f => f.name === ASSIGNEE_FIELD).map(({ name, value }) => ({ name, value }));
+  embed.setFields([...others, ...live]);
+}
+
+async function reconcileStoredAssignee(thread: ThreadChannel, liveAssigneeId: string | null): Promise<void> {
+  const stored = await StoredReport.get(thread.id);
+  if (!stored || stored.data.assigneeId === liveAssigneeId) return;
+  await StoredReport.update(thread.id, { assigneeId: liveAssigneeId });
+  await scheduleBadgeSync(thread);
 }
 
 export async function submitReport(
@@ -195,14 +200,23 @@ export async function submitReport(
     const priority = params.label === 'Bug Report' ? DEFAULT_BUG_PRIORITY : null;
     const tagForum = priority != null ? await ensureForumTag(forum, `Priority ${priority}`) : forum;
     const allTagNames = priority != null ? [...params.tagNames, `Priority ${priority}`] : params.tagNames;
-    const tagIds = allTagNames.length > 0 ? resolveTagIds(tagForum, allTagNames) : undefined;
+    const baseTagIds = resolveTagIds(tagForum, allTagNames);
+
+    const assignee = await resolveDefaultAssignee(guild);
+    const badge = assignee && await badgeForAssignee(assignee.userId).catch(err => {
+      log.warn({ err }, 'Could not resolve default assignee badge');
+      return null;
+    });
+    const tagIds = assignee ? await withAssigneeTags(tagForum, baseTagIds, assignee) : baseTagIds;
+    if (assignee) params.embed.addFields(assigneeField(assignee.userId));
+    const title = formatThreadTitle(STATUS_EMOJI['new'], params.label, generatedTitle, null, priority != null ? PRIORITY_EMOJIS[priority] : '');
 
     let thread;
     try {
       thread = await forum.threads.create({
         // Ticket id omitted here: adding it would need a post-create rename, spending
         // one of the 2-per-10-min title edits. title-sync folds it in on first status change.
-        name: formatThreadTitle(STATUS_EMOJI['new'], params.label, generatedTitle, null, priority != null ? PRIORITY_EMOJIS[priority] : ''),
+        name: badge ? fitTitle(joinBadge(badge, title)) : title,
         message: { content: `<@${params.reporterId}>`, embeds: [params.embed] },
         appliedTags: tagIds,
       });
@@ -220,12 +234,16 @@ export async function submitReport(
       reporterId: params.reporterId,
       label: params.label,
       threadName: thread.name,
-      assigneeId: null,
+      assigneeId: assignee?.userId ?? null,
       url: thread.url,
-      tagNames: allTagNames,
+      tagNames: [...new Set([...allTagNames, ...tagForum.availableTags.filter(t => tagIds.includes(t.id)).map(t => t.name)])],
       createdTimestamp: thread.createdTimestamp ?? Date.now(),
       lastActivityAt: Date.now(),
     });
+
+    if (assignee) {
+      await thread.members.add(assignee.userId).catch(err => log.warn({ err }, 'Failed to add default assignee to thread'));
+    }
 
     return { thread, ticketId };
   };
@@ -284,14 +302,25 @@ export async function submitReport(
   }
 
   await addWikiSuggestions(params.embed, params.wikiQuery);
-  const donate = donateField(config);
-  if (donate) params.embed.addFields(donate);
-  const starter = await thread.fetchStarterMessage();
-  if (starter) {
+  const starter = await withThreadLock(`assignee:${thread.id}`, async () => {
+    const message = await thread.fetchStarterMessage({ force: true }).catch(() => thread.fetchStarterMessage());
+    if (!message) return null;
+    const liveEmbed = message.embeds[0];
+    if (liveEmbed) {
+      carryOverAssignee(params.embed, liveEmbed.fields ?? []);
+      await reconcileStoredAssignee(thread, assigneeIdFromFields(liveEmbed.fields)).catch(err => {
+        log.warn({ err, threadId: thread.id }, 'Failed to reconcile stored assignee');
+      });
+    }
+    const donate = donateField(config);
+    if (donate) params.embed.addFields(donate);
     const actionRow = buildActionRow(ticketId);
-    await starter.edit({ embeds: [params.embed], components: [actionRow] }).catch(err => {
+    await message.edit({ embeds: [params.embed], components: [actionRow] }).catch(err => {
       log.error({ err }, 'Failed to edit starter message');
     });
+    return message;
+  });
+  if (starter) {
     await starter.pin().catch(err => {
       log.error({ err }, 'Failed to pin starter message');
     });

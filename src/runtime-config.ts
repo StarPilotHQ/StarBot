@@ -4,6 +4,9 @@ import { createStore } from './store.js';
 // into the home for settings that migrate off env vars over time.
 const configStore = createStore<unknown>('runtime-config');
 
+// Keyv reports failed reads as missing keys; use this where that must not look like "unset".
+export const strictConfigStore = createStore<unknown>('runtime-config', { throwOnErrors: true });
+
 export async function readConfigKey<T>(key: string): Promise<T | undefined> {
   return configStore.get(key) as T | undefined;
 }

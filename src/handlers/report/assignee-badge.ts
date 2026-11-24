@@ -60,6 +60,14 @@ export function clearAssigneeEmoji(userId: string): Promise<boolean> {
   });
 }
 
+export function assigneeField(userId: string): { name: string; value: string } {
+  return { name: ASSIGNEE_FIELD, value: `<@${userId}>` };
+}
+
+export async function badgeForAssignee(userId: string): Promise<string | null> {
+  return (await emojiStore.get(EMOJI_KEY))?.[userId] ?? null;
+}
+
 export function assigneeIdFromFields(fields: ReadonlyArray<{ name: string; value: string }> | undefined): string | null {
   return fields?.find(f => f.name === ASSIGNEE_FIELD)?.value.match(/<@!?(\d+)>/)?.[1] ?? null;
 }
@@ -78,7 +86,7 @@ export async function resolveBadge(thread: ThreadChannel): Promise<string | null
   try {
     const assigneeId = await resolveAssigneeId(thread);
     if (!assigneeId) return null;
-    return (await emojiStore.get(EMOJI_KEY))?.[assigneeId] ?? null;
+    return await badgeForAssignee(assigneeId);
   } catch (err) {
     log.warn({ err, threadId: thread.id }, 'Could not resolve assignee badge');
     return undefined;

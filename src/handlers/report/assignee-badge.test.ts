@@ -20,7 +20,7 @@ vi.mock('../../logger.js', () => ({
   createLogger: () => ({ warn: () => {}, error: () => {}, info: () => {}, debug: () => {} }),
 }));
 
-import { claimAssigneeEmoji, clearAssigneeEmoji, parseAssigneeEmoji, reportsNeedingBadgeSync, resolveBadge } from './assignee-badge.js';
+import { assigneeField, assigneeIdFromFields, badgeForAssignee, claimAssigneeEmoji, clearAssigneeEmoji, parseAssigneeEmoji, reportsNeedingBadgeSync, resolveBadge } from './assignee-badge.js';
 import { StoredReport, type StoredReportData } from './report-store.js';
 import { splitBadge, statusFromTitle, stripLeadingEmoji } from './report-title.js';
 import { priorityFromTitle, setPriorityInTitle, stripPriorityEmoji } from './priority.js';
@@ -409,5 +409,17 @@ describe('badge sync', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(a.name).toBe('🦊 🟠 A (9)');
     expect(pending()).toEqual({});
+  });
+});
+
+describe('assignee helpers', () => {
+  it('writes a field that parses back to the same user', () => {
+    expect(assigneeIdFromFields([assigneeField('42')])).toBe('42');
+  });
+
+  it('looks up a claimed emoji by user', async () => {
+    expect(await badgeForAssignee('42')).toBeNull();
+    await claimAssigneeEmoji('42', '🦊');
+    expect(await badgeForAssignee('42')).toBe('🦊');
   });
 });
