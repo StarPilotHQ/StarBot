@@ -373,7 +373,7 @@ async function clearOpenWaitUserPrompts(thread: ThreadChannel): Promise<void> {
 
 export type WaitUserResult = { applied: 'fix-incoming' } | { applied: 'waiting-for-user'; requiredDate?: string };
 
-async function finalizeWaitUser(thread: ThreadChannel, forum: ForumChannel, params: WaitUserParams): Promise<WaitUserResult> {
+export async function finalizeWaitUser(thread: ThreadChannel, forum: ForumChannel, params: WaitUserParams): Promise<WaitUserResult> {
   if (params.mode === 'newernow' && waitBranchConfigured()) {
     await finalizeFixIncoming(thread, forum, params);
     return { applied: 'fix-incoming' };

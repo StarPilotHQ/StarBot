@@ -7,6 +7,7 @@ import './handlers/clip/index.js';
 import './handlers/identification/index.js';
 import './handlers/report/index.js';
 import './handlers/report/report-actions.js';
+import './handlers/report/companion-discord.js';
 import './handlers/report/backfill.js';
 import './handlers/report/freeze.js';
 import './handlers/report/default-assignee-command.js';

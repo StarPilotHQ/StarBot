@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { EmbedBuilder, type ModalSubmitInteraction } from 'discord.js';
+import { EmbedBuilder, type ButtonInteraction, type ModalSubmitInteraction } from 'discord.js';
+import { moveCompanionReport, type CompanionSource } from './companion-referral.js';
 
 const h = vi.hoisted(() => ({
   stores: new Map<string, Map<string, unknown>>(),
@@ -96,10 +97,82 @@ function setup(staff = true) {
   const suppressEmbeds = () => { suppressed = true; };
   const created = () => create.mock.calls[0][0];
   const finalFields = () => starter.edit.mock.calls.at(-1)![0].embeds[0].toJSON().fields ?? [];
-  return { thread, starter, submit, reassignTo, assignAtCreation, suppressEmbeds, created, finalFields, editReply };
+  return { thread, starter, submit, reassignTo, assignAtCreation, suppressEmbeds, created, finalFields, editReply, create, interaction };
 }
 
 const assigneeFields = (fields: { name: string; value: string }[]) => fields.filter(f => f.name === ASSIGNEE_FIELD);
+
+describe('staff referrals from Companion', () => {
+  function fixture() {
+    const t = setup();
+    const guildId = '1000000000000000001';
+    const source = { guildId, forumId: 'companion', threadId: 'source', reporterId: 'original-reporter',
+      title: 'Brakes late', publicDescription: 'Brakes late at a turn' };
+    const interaction = { ...t.interaction, guildId, channelId: 'review', user: { id: 'staff' } } as ButtonInteraction;
+    let attempted = false;
+    const finishMove = vi.fn(async (_source: CompanionSource, _url: string) => {});
+    const ports = {
+      guildId, reviewThreadId: 'review', companionForumId: 'companion',
+      loadSource: async () => source, isStaff: async (id: string) => id === 'staff',
+      getAttempt: async () => attempted, markAttempt: async () => { attempted = true; },
+      findReadyTicket: async () => {
+        const stored = await StoredReport.get(THREAD_ID);
+        const payload = t.starter.edit.mock.lastCall?.[0] as
+          { components?: { toJSON(): { components: { custom_id?: string }[] } }[] } | undefined;
+        const buttons = payload?.components?.[0]?.toJSON().components;
+        return stored?.reporterId === source.reporterId && buttons?.some(b => b.custom_id === 'staff_actions_' + stored.data.ticketId)
+          ? stored.url : undefined;
+      }, requestRouteOnce: vi.fn(async (_source: CompanionSource, _url: string) => {}), finishMove,
+    };
+    const move = () => moveCompanionReport(interaction, source.threadId, ports);
+    return { t, ports, finishMove, move };
+  }
+
+  it('keeps the reporter and native staff controls on a route-less ticket across simultaneous clicks', async () => {
+    const { t, move, finishMove } = fixture();
+    expect(await Promise.all([move(), move()])).toEqual(['https://thread', 'https://thread']);
+    expect(t.create).toHaveBeenCalledTimes(1);
+    expect(t.created().message.embeds[0].data.fields).toContainEqual({ name: 'Route', value: 'Not provided' });
+    expect(finishMove).toHaveBeenCalledWith(expect.objectContaining({ reporterId: 'original-reporter' }), 'https://thread');
+  });
+
+  it('recovers an interrupted source close using the existing ticket', async () => {
+    const { t, move, finishMove } = fixture();
+    finishMove.mockRejectedValueOnce(new Error('temporary failure'));
+    await expect(move()).rejects.toThrow('temporary failure');
+    expect(await move()).toBe('https://thread');
+    expect(t.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a failed route request in the existing driving ticket before closing the source', async () => {
+    const { t, ports, move, finishMove } = fixture();
+    ports.requestRouteOnce.mockRejectedValueOnce(new Error('send failed'));
+    await expect(move()).rejects.toThrow('send failed');
+    expect(finishMove).not.toHaveBeenCalled();
+    await move();
+    expect(t.create).toHaveBeenCalledTimes(1);
+    expect(finishMove).toHaveBeenCalledOnce();
+  });
+
+  it('leaves the source open if native staff controls never arrive, including on retry', async () => {
+    const { t, move, finishMove } = fixture();
+    t.thread.fetchStarterMessage.mockRejectedValue(new Error('unavailable'));
+    await expect(move()).rejects.toThrow();
+    await expect(move()).rejects.toThrow('reconciliation');
+    expect(t.create).toHaveBeenCalledTimes(1);
+    expect(finishMove).not.toHaveBeenCalled();
+  });
+
+  it('rejects unauthorized users and wrong review channels before creating a ticket', async () => {
+    const { t, ports, move } = fixture();
+    ports.reviewThreadId = 'wrong';
+    await expect(move()).rejects.toThrow('staff access');
+    ports.reviewThreadId = 'review';
+    ports.isStaff = async () => false;
+    await expect(move()).rejects.toThrow('staff access');
+    expect(t.create).not.toHaveBeenCalled();
+  });
+});
 
 beforeEach(() => {
   for (const m of h.stores.values()) m.clear();
