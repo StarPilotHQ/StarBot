@@ -21,10 +21,20 @@ const read = async (id: string) => (await records.get(id)) ?? {};
 const save = async (id: string, patch: Partial<State>) => records.set(id, { ...await read(id), ...patch });
 
 export function parseOpener(text: string) {
-  const m = /^Report from <@!?(\d{17,20})>[^\n]*\n(?:For <@!?\d{17,20}>\n)?Reference: [\w-]+\r?\n\r?\n([\s\S]+)/.exec(text);
+  const m = /^Report from <@!?(\d{17,20})>[^\n]*\n(?:For [^\n]*\n)?Reference: [^\n]+\n\s*\n([\s\S]+)/.exec(text.replace(/\r\n/g,'\n').trimStart());
   if (!m) return;
   const description = m[2].split(/\n\s*(?:Private diagnostics:|Staff diagnostics:)/i)[0].trim();
   if (description) return { reporterId: m[1], publicDescription: description };
+}
+class ReferralProblem extends Error {}
+function texts(node: unknown): string[] {
+  if (!node || typeof node!=='object') return [];
+  if ('type' in node && node.type===10 && 'content' in node && typeof node.content==='string') return [node.content];
+  return 'components' in node && Array.isArray(node.components) ? node.components.flatMap(texts) : [];
+}
+export function reportFromStarter(content: string, components: unknown[]) {
+  const blocks=[content,...components.flatMap(texts)].filter(Boolean);
+  return blocks.map(parseOpener).find(Boolean) ?? parseOpener(blocks.join('\n'));
 }
 export function suggestsDriving(text: string) {
   return /\b(?:phantom brak(?:ing|es)|steering wobble|lane centering|ping[- ]pong(?:ing)?|brak(?:es|ing|ed) (?:hard|late|early)|steer(?:s|ing|ed) (?:hard|left|right)|longitudinal control)\b/i.test(text);
@@ -33,38 +43,66 @@ async function staff(guild: Guild, id: string) {
   return (await guild.members.fetch({ user: id, force: true })).roles.cache.has(loadConfig().staffRole);
 }
 async function room(guild: Guild) {
-  const channel = await guild.channels.fetch(reviewRoom);
+  const channel = await guild.channels.fetch(reviewRoom).catch(()=>null);
+  if (!channel) throw new ReferralProblem('StarBot cannot see <#'+reviewRoom+'>. Give StarBot View Channel there and add it if it is a private thread.');
   if (!channel?.isSendable() || (channel.type !== ChannelType.PrivateThread &&
     channel.permissionsFor(guild.roles.everyone)?.has(PermissionFlagsBits.ViewChannel) !== false))
-    throw Error('The configured review channel must be staff-only.');
+    throw new ReferralProblem('The configured review channel must be staff-only and allow messages.');
+  const permissions = channel.permissionsFor(guild.members.me ?? guild.client.user);
+  if (!permissions?.has(channel.isThread()?PermissionFlagsBits.SendMessagesInThreads:PermissionFlagsBits.SendMessages) ||
+      !permissions.has(PermissionFlagsBits.EmbedLinks)) throw new ReferralProblem('Give StarBot permission to send messages and embed links in <#'+reviewRoom+'>.');
   return channel;
 }
 async function sourceOf(thread: ThreadChannel): Promise<CompanionSource> {
   if (thread.parentId !== publicForum || thread.guildId !== guildId()) throw Error('Use a public Companion report.');
-  const msg = await thread.fetchStarterMessage({ force: true });
-  if (msg?.author.id !== companion) throw Error('The original Companion report could not be verified.');
-  const cards = msg.components.flatMap(c => {
-    const obj = c.toJSON();
-    if (!('components' in obj)) return [];
-    return obj.components.flatMap(v => 'content' in v && typeof v.content === 'string' ? [v.content] : []);
-  });
-  const data = [msg.content,...cards].map(parseOpener).find(Boolean);
-  if (!data) throw Error('The original reporter could not be verified.');
+  const msg = await thread.messages.fetch({message:thread.id,force:true}).catch(()=>null);
+  if (!msg) throw new ReferralProblem('StarBot could not read the opening post. Check View Channel and Read Message History in the Companion forum.');
+  const legacyWebhooks=(process.env.COMPANION_REPORT_WEBHOOK_IDS ?? '').split(',').map(id=>id.trim()).filter(Boolean);
+  const trustedLegacy=!!msg.webhookId && legacyWebhooks.includes(msg.webhookId);
+  const components=msg.components.map(c=>c.toJSON());
+  const data = reportFromStarter(msg.content,components);
+  if(!data && msg.author.id===companion) {
+    const body=[msg.content,...components.flatMap(texts)].join('\n');
+    const prior=/\[Original driving report\]\((https:\/\/discord\.com\/channels\/(\d+)\/(\d+))\)\s*$/.exec(body);
+    if(prior && prior[2]===guildId() && body.includes('We moved your report here from driving feedback')) {
+      throw new ReferralProblem('This report already has an [original driving ticket]('+prior[1]+'). Staff can review or reopen it there.');
+    }
+  }
+  if(msg.author.id!==companion && !trustedLegacy) {
+    if(!msg.webhookId || !data) throw new ReferralProblem('The opening post is not a verified Companion report.');
+    // A later Companion-owned controls card can confirm the original reporter on an old webhook ticket.
+    const history=await thread.messages.fetch({limit:100}).catch(()=>null);
+    const corroborated=history?.some(m=>m.author.id===companion && m.components.some(c=>{
+      const row=c.toJSON();
+      return 'components' in row && row.components.some(b=>'custom_id' in b &&
+        new RegExp('^case:'+data.reporterId+':(?:ios|android):menu(?::'+thread.id+')?$').test(b.custom_id ?? ''));
+    }));
+    if(!corroborated) throw new ReferralProblem('This legacy report was posted by webhook '+msg.webhookId+'. Verify its ID and add it to COMPANION_REPORT_WEBHOOK_IDS on StarBot.');
+  }
+  if (!data) throw new ReferralProblem('The opening post has no recognized reporter and report text. Check StarBot’s Message Content access and the original report format.');
   return { guildId: thread.guildId, forumId: publicForum, threadId: thread.id, title: thread.name, ...data };
 }
 async function offer(thread: ThreadChannel, manual: boolean) {
   const source = await sourceOf(thread);
-  if (thread.archived || thread.locked || (!manual && !suggestsDriving(source.publicDescription))) return;
+  if (thread.archived || thread.locked) {
+    if(manual) throw new ReferralProblem('Reopen the Companion report before referring it.');
+    return;
+  }
+  if(!manual && !suggestsDriving(source.publicDescription))return;
   await withThreadLock('review:'+thread.id, async () => {
     const state = await read(thread.id);
-    if (state.card || state.done || state.left) return;
+    if (state.done || state.left || state.card) {
+      if(manual && state.done && state.destination)throw new ReferralProblem('This report already moved to <#'+state.destination+'>.');
+      if(manual && state.left)throw new ReferralProblem('Staff previously chose Leave as is for this report.');
+      return;
+    }
     const review = await room(thread.guild);
     const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId('driveleave_'+thread.id).setStyle(ButtonStyle.Secondary).setLabel('Leave as is'),
       new ButtonBuilder().setCustomId('drivemove_'+thread.id).setStyle(ButtonStyle.Primary).setLabel('Move to Driving Reports'));
     const card = await review.send({ embeds: [new EmbedBuilder().setTitle('Possible driving report').setURL(thread.url)
       .setDescription(source.publicDescription.slice(0,1500)).setColor(0xe3a534)], components:[buttons], allowedMentions:{parse:[]},
-      nonce:thread.id, enforceNonce:true });
+      nonce:thread.id, enforceNonce:true }).catch(error=>{log.warn({err:error,threadId:thread.id},'Could not send review card');throw new ReferralProblem('StarBot could not post the review card in <#'+reviewRoom+'>. Check its channel permissions and whether the thread is locked.');});
     await save(thread.id,{card:card.id});
   });
 }
@@ -124,7 +162,7 @@ export class DrivingTransfers {
       await i.editReply('This command requires staff access in a Companion report.'); return;
     }
     try { await offer(i.channel,true); await i.editReply('Review this report in the staff channel.'); }
-    catch { await i.editReply('Could not verify an eligible Companion report and its review channel.'); }
+    catch(err) { log.warn({err,threadId:i.channelId},'Manual driving referral failed'); await i.editReply(err instanceof ReferralProblem?err.message:'StarBot could not save or read the referral. Check its service log for this thread.'); }
   }
   @ButtonComponent({id:/^drive(move|leave)_\d{17,20}$/})
   async decision(i:ButtonInteraction) {
