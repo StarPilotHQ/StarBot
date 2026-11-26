@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ModalSubmitInteraction, ButtonInteraction, CommandInteraction } from 'discord.js';
-vi.mock('../../store.js',()=>({createStore:()=>({get:vi.fn(),set:vi.fn()})}));
+vi.mock('../../store.js',()=>({createStore:()=>new Map()}));
 vi.mock('../../config.js',()=>({loadConfig:()=>({guildId:'1387432184121393333',staffRole:'sage'})}));
 vi.mock('../../logger.js',()=>({createLogger:()=>({info:vi.fn(),warn:vi.fn(),error:vi.fn()})}));
 vi.mock('./title-generator.js',()=>({titleGenerator:{generate:async()=>null}}));
@@ -8,6 +8,24 @@ import { DrivingTransfers, parseOpener, reportFromStarter, suggestsDriving } fro
 import { BotReport } from './index.js';
 
 describe('Discord referral entry points',()=>{
+  it.each(['manual','automatic'])('pings exactly the three reviewers once when %s review comes first',async first=>{
+    const guildId='1387432184121393333';
+    const id=first==='manual'?'1000000000000000051':'1000000000000000052';
+    const send=vi.fn(async (_payload:unknown)=>({id:'card'}));
+    const room={type:12,isSendable:()=>true,isThread:()=>true,permissionsFor:()=>({has:()=>true}),send};
+    const guild={members:{me:{},fetch:async()=>({roles:{cache:new Map([['sage',true]])}})},channels:{fetch:async()=>room}};
+    const thread={id,guildId,guild,parentId:'1565235002734809168',url:'https://discord.com/channels/'+guildId+'/'+id,
+      isThread:()=>true,messages:{fetch:async()=>({author:{id:'1574857862872703088'},components:[],
+        content:'Report from <@1000000000000000042> (user)\nReference: abc\n\nSteering wobble @everyone'})}};
+    const handler=new DrivingTransfers();
+    const manual=()=>handler.manual({channel:thread,guild,user:{id:'staff'},deferReply:vi.fn(),editReply:vi.fn()} as unknown as CommandInteraction);
+    const auto=()=>handler.newThread([thread,true] as unknown as Parameters<typeof handler.newThread>[0]);
+    if(first==='manual'){await manual();await auto();}else{await auto();await manual();}
+    const users=['524762496373096459','420178305073938433','446126627701915653'];
+    expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      content:users.map(id=>'<@'+id+'>').join(' '),allowedMentions:{parse:[],users},
+    }));
+  });
   it.each(['modern','verified legacy','unverified legacy'])('reports the correct failure stage for a %s StarPort ticket',async kind=>{
     const guildId='1387432184121393333', threadId='1000000000000000049', reporter='1000000000000000042', bot='1574857862872703088';
     const guild={members:{fetch:async()=>({roles:{cache:new Map([['sage',true]])}})},channels:{fetch:vi.fn(async()=>null)}};

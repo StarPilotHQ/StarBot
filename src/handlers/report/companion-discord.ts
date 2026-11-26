@@ -13,6 +13,8 @@ const log = createLogger('companion-handoff');
 const publicForum = '1565235002734809168';
 const reviewRoom = '1575000066366644244';
 const companion = '1574857862872703088';
+// Nate, Di, and Firestar review both manual and automatic referrals.
+const reviewUsers = ['524762496373096459', '420178305073938433', '446126627701915653'];
 const guildId = () => loadConfig().guildId;
 const enabled = () => guildId() === '1387432184121393333' && process.env.COMPANION_DRIVING_TRANSFERS !== 'off';
 interface State { card?: string; attempted?: boolean; destination?: string; requested?: boolean; notice?: string; done?: boolean; left?: boolean }
@@ -100,8 +102,9 @@ async function offer(thread: ThreadChannel, manual: boolean) {
     const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId('driveleave_'+thread.id).setStyle(ButtonStyle.Secondary).setLabel('Leave as is'),
       new ButtonBuilder().setCustomId('drivemove_'+thread.id).setStyle(ButtonStyle.Primary).setLabel('Move to Driving Reports'));
-    const card = await review.send({ embeds: [new EmbedBuilder().setTitle('Possible driving report').setURL(thread.url)
-      .setDescription(source.publicDescription.slice(0,1500)).setColor(0xe3a534)], components:[buttons], allowedMentions:{parse:[]},
+    const card = await review.send({ content: reviewUsers.map(id => '<@'+id+'>').join(' '),
+      embeds: [new EmbedBuilder().setTitle('Possible driving report').setURL(thread.url)
+      .setDescription(source.publicDescription.slice(0,1500)).setColor(0xe3a534)], components:[buttons], allowedMentions:{parse:[],users:reviewUsers},
       nonce:thread.id, enforceNonce:true }).catch(error=>{log.warn({err:error,threadId:thread.id},'Could not send review card');throw new ReferralProblem('StarBot could not post the review card in <#'+reviewRoom+'>. Check its channel permissions and whether the thread is locked.');});
     await save(thread.id,{card:card.id});
   });
