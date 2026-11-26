@@ -157,7 +157,7 @@ export class DrivingTransfers {
     if(enabled() && msg.author.id===companion && msg.id===msg.channelId && msg.channel.isThread() && msg.channel.parentId===publicForum)
       await offer(msg.channel,false).catch(err=>log.warn({err},'Companion opener unavailable'));
   }
-  @Slash({name:'refer-driving',description:'Review this Companion report for transfer to driving support',defaultMemberPermissions:PermissionFlagsBits.ManageThreads})
+  @Slash({name:'review-for-driving',description:'Ask staff to review this Companion ticket for transfer to Driving Reports.',defaultMemberPermissions:PermissionFlagsBits.ManageThreads})
   @DiscordGuild(guildId)
   async manual(i:CommandInteraction) {
     await i.deferReply({flags:MessageFlags.Ephemeral});
