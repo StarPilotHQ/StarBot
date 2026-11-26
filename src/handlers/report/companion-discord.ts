@@ -169,8 +169,13 @@ export class DrivingTransfers {
   }
   @ButtonComponent({id:/^drive(move|leave)_\d{17,20}$/})
   async decision(i:ButtonInteraction) {
-    await i.deferReply({flags:MessageFlags.Ephemeral});
+    const inReviewRoom=i.channelId===reviewRoom && i.guildId===guildId();
+    await i.deferReply(inReviewRoom ? {} : {flags:MessageFlags.Ephemeral});
     const id=i.customId.split('_')[1], guild=i.guild;
+    const resultCard=(title:string,description:string,color:number)=>({
+      content:null, embeds:[new EmbedBuilder().setTitle(title).setDescription(description).setColor(color)],
+      components:[], allowedMentions:{parse:[] as const},
+    });
     try {
       if(!enabled() || !guild || i.channelId!==reviewRoom || i.guildId!==guildId() || !(await staff(guild,i.user.id))) throw Error('Staff access required.');
       await room(guild);
@@ -182,10 +187,11 @@ export class DrivingTransfers {
             ? '[Open driving ticket](https://discord.com/channels/'+guild.id+'/'+state.destination+').'
             : 'Original Companion report kept open.';
           await i.message.edit({embeds:[new EmbedBuilder().setTitle('Review complete').setDescription(description)],components:[]});
-          await i.editReply('This review is complete.');return;
+          await i.editReply(resultCard('Already reviewed',description,0x5865f2));return;
         }
-        let result='Original Companion report kept open.';
-        if(i.customId.startsWith('driveleave')) {
+        let result='[Open original Companion report](https://discord.com/channels/'+guild.id+'/'+id+').';
+        const leave=i.customId.startsWith('driveleave');
+        if(leave) {
           if(state.attempted) throw Error('A move is already pending. Check its driving ticket.');
           await save(id,{left:true});
         } else {
@@ -207,8 +213,8 @@ export class DrivingTransfers {
           result='[Open driving ticket]('+destination+'). The reporter was asked for their route.';
         }
         await i.message.edit({embeds:[new EmbedBuilder().setTitle('Review complete').setDescription(result)],components:[]});
-        await i.editReply('Review complete.');
+        await i.editReply(resultCard(leave?'Left in Companion Support':'Moved to Driving Reports',result,leave?0x5865f2:0x3498db));
       });
-    } catch(err) {log.warn({err,source:id},'Driving transfer incomplete'); await i.editReply('Transfer incomplete. Check the review card and driving forum before retrying.');}
+    } catch(err) {log.warn({err,source:id},'Driving transfer incomplete'); await i.editReply(resultCard('Review needs attention','StarBot could not confirm the outcome. Check the review card and driving forum before retrying.',0xe3a534));}
   }
 }

@@ -25,6 +25,13 @@ describe('Discord referral entry points',()=>{
     expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       content:users.map(id=>'<@'+id+'>').join(' '),allowedMentions:{parse:[],users},
     }));
+    const deferReply=vi.fn(), editReply=vi.fn(), edit=vi.fn();
+    await handler.decision({guild,guildId,channelId:'1575000066366644244',customId:'driveleave_'+id,
+      user:{id:'staff'},client:{user:{id:'bot'}},message:{id:'card',author:{id:'bot'},edit},
+      deferReply,editReply} as unknown as ButtonInteraction);
+    expect(deferReply).toHaveBeenCalledWith({});
+    expect(editReply.mock.calls[0][0].embeds[0].data.title).toBe('Left in Companion Support');
+    expect(edit).toHaveBeenCalledOnce();
   });
   it.each(['modern','verified legacy','unverified legacy'])('reports the correct failure stage for a %s StarPort ticket',async kind=>{
     const guildId='1387432184121393333', threadId='1000000000000000049', reporter='1000000000000000042', bot='1574857862872703088';
