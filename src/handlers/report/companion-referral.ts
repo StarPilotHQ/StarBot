@@ -1,4 +1,5 @@
 import { EmbedBuilder, type ButtonInteraction } from 'discord.js';
+import { titleGenerator } from './title-generator.js';
 import { submitReport } from './report-service.js';
 import { withThreadLock } from './title-sync.js';
 import type { ForumChannel, ThreadChannel } from 'discord.js';
@@ -59,7 +60,8 @@ export async function moveCompanionReport(interaction: ButtonInteraction, thread
       const link = 'https://discord.com/channels/' + source.guildId + '/' + threadId;
       await submitReport(interaction, {
         reporterId: source.reporterId, label: 'Bug Report',
-        title: Promise.resolve(source.title), wikiQuery: source.publicDescription,
+        title: titleGenerator.generate('Bug Report', source.publicDescription, source.publicDescription),
+        wikiQuery: source.publicDescription,
         additionalRoutes: [], tagNames: ['OPEN', 'BUG', 'WAITING FOR DEV'],
         embed: new EmbedBuilder().setDescription(source.publicDescription.slice(0, 4096))
           .addFields({ name: 'By', value: '<@' + source.reporterId + '>' },

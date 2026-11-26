@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EmbedBuilder, type ButtonInteraction, type ModalSubmitInteraction } from 'discord.js';
+import { titleGenerator } from './title-generator.js';
+vi.mock('./title-generator.js', () => ({ titleGenerator: { generate: vi.fn(async () => 'Late braking at turns') } }));
 import { moveCompanionReport, type CompanionSource } from './companion-referral.js';
 
 const h = vi.hoisted(() => ({
@@ -107,7 +109,7 @@ describe('staff referrals from Companion', () => {
     const t = setup();
     const guildId = '1000000000000000001';
     const source = { guildId, forumId: 'companion', threadId: 'source', reporterId: 'original-reporter',
-      title: 'Brakes late', publicDescription: 'Brakes late at a turn' };
+      title: '🟠 iOS — Brakes late', publicDescription: 'Brakes late at a turn' };
     const interaction = { ...t.interaction, guildId, channelId: 'review', user: { id: 'staff' } } as ButtonInteraction;
     let attempted = false;
     const finishMove = vi.fn(async (_source: CompanionSource, _url: string) => {});
@@ -132,6 +134,9 @@ describe('staff referrals from Companion', () => {
     const { t, move, finishMove } = fixture();
     expect(await Promise.all([move(), move()])).toEqual(['https://thread', 'https://thread']);
     expect(t.create).toHaveBeenCalledTimes(1);
+    expect(titleGenerator.generate).toHaveBeenCalledWith('Bug Report', 'Brakes late at a turn', 'Brakes late at a turn');
+    expect(t.created().name).toContain('Bug Report - Late braking at turns');
+    expect(t.created().name).not.toContain('iOS —');
     expect(t.created().message.embeds[0].data.fields).toContainEqual({ name: 'Route', value: 'Not provided' });
     expect(finishMove).toHaveBeenCalledWith(expect.objectContaining({ reporterId: 'original-reporter' }), 'https://thread');
   });

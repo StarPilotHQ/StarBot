@@ -176,12 +176,14 @@ export class DrivingTransfers {
       content:null, embeds:[new EmbedBuilder().setTitle(title).setDescription(description).setColor(color)],
       components:[], allowedMentions:{parse:[] as const},
     });
+    let verifiedCard=false;
     try {
       if(!enabled() || !guild || i.channelId!==reviewRoom || i.guildId!==guildId() || !(await staff(guild,i.user.id))) throw Error('Staff access required.');
       await room(guild);
       await withThreadLock('review:'+id,async()=>{
         const state=await read(id);
         if (state.card!==i.message.id || i.message.author.id!==i.client.user.id) throw Error('Invalid review card.');
+        verifiedCard=true;
         if (state.done || state.left) {
           const description=state.done && state.destination
             ? '[Open driving ticket](https://discord.com/channels/'+guild.id+'/'+state.destination+').'
@@ -215,6 +217,19 @@ export class DrivingTransfers {
         await i.message.edit({embeds:[new EmbedBuilder().setTitle('Review complete').setDescription(result)],components:[]});
         await i.editReply(resultCard(leave?'Left in Companion Support':'Moved to Driving Reports',result,leave?0x5865f2:0x3498db));
       });
-    } catch(err) {log.warn({err,source:id},'Driving transfer incomplete'); await i.editReply(resultCard('Review needs attention','StarBot could not confirm the outcome. Check the review card and driving forum before retrying.',0xe3a534));}
+    } catch(err) {
+      log.warn({err,source:id},'Driving transfer incomplete');
+      const state=verifiedCard ? await read(id).catch(()=>undefined) : undefined;
+      let detail='Check the review card and driving forum before retrying.';
+      if(state?.destination && guild) {
+        const link='[Open the driving ticket](https://discord.com/channels/'+guild.id+'/'+state.destination+').';
+        detail=link+' '+(state.done ? 'The move finished. The review card could not be updated.'
+          : state.requested ? 'The route request was sent. Check whether the Companion thread was closed.'
+          : 'Check the driving thread for the route request. StarBot could not confirm that step.');
+      } else if(state?.attempted) {
+        detail='StarBot started the move but could not verify a driving ticket with working staff controls. Check the driving forum for the original Companion report link before retrying.';
+      }
+      await i.editReply(resultCard('Review needs attention',detail,0xe3a534));
+    }
   }
 }
