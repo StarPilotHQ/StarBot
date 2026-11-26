@@ -70,6 +70,7 @@ describe('Discord referral entry points',()=>{
   it('extracts the original reporter and the public description',()=>{
     expect(parseOpener('Report from <@1000000000000000042> (user)\nFor <@1000000000000000043>\nReference: abc-123\n\nSteering wobble\nPrivate diagnostics: private')).toEqual({
       reporterId:'1000000000000000042',publicDescription:'Steering wobble'});
+    expect(suggestsDriving('Hi, my car ping pongs')).toBe(true);
     expect(suggestsDriving('Steering wobble')).toBe(true);
     expect(suggestsDriving('The phone app crashed opening my route')).toBe(false);
   });

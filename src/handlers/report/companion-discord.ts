@@ -39,7 +39,7 @@ export function reportFromStarter(content: string, components: unknown[]) {
   return blocks.map(parseOpener).find(Boolean) ?? parseOpener(blocks.join('\n'));
 }
 export function suggestsDriving(text: string) {
-  return /\b(?:phantom brak(?:ing|es)|steering wobble|lane centering|ping[- ]pong(?:ing)?|brak(?:es|ing|ed) (?:hard|late|early)|steer(?:s|ing|ed) (?:hard|left|right)|longitudinal control)\b/i.test(text);
+  return /\b(?:phantom brak(?:ing|es)|steering wobble|lane centering|ping[- ]pong(?:s|ing)?|brak(?:es|ing|ed) (?:hard|late|early)|steer(?:s|ing|ed) (?:hard|left|right)|longitudinal control)\b/i.test(text);
 }
 async function staff(guild: Guild, id: string) {
   return (await guild.members.fetch({ user: id, force: true })).roles.cache.has(loadConfig().staffRole);
