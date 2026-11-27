@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Client, ForumChannel, ThreadChannel } from 'discord.js';
 
 const backing: Record<string, Record<string, unknown>> = {};
@@ -22,9 +22,9 @@ vi.mock('./route-tracker.js', () => ({
 vi.mock('./freeze-state.js', () => ({
   isFrozen: vi.fn(),
 }));
-const commitListeners: Array<(commit: unknown) => void> = [];
+let pollTip: (commit: CommitTip) => Promise<void>;
 vi.mock('./commit-watcher.js', () => ({
-  onCommit: (fn: (commit: unknown) => void) => { commitListeners.push(fn); },
+  onBranchTip: (fn: typeof pollTip) => { pollTip = fn; },
 }));
 
 import { getForum } from './route-tracker.js';
@@ -81,20 +81,25 @@ function clientMock(thread: ThreadChannel | null): Client {
   } as unknown as Client;
 }
 
-async function emit(commit: CommitTip): Promise<void> {
-  for (const fn of commitListeners) fn(commit);
-  await new Promise(resolve => setImmediate(resolve));
+const DELAY_MS = 15 * 60 * 1000;
+
+async function pollAfterDelay(commit: CommitTip): Promise<void> {
+  await pollTip(commit);
+  vi.setSystemTime(Date.now() + DELAY_MS);
+  await pollTip(commit);
 }
 
 beforeEach(() => {
   for (const key of Object.keys(backing)) delete backing[key];
-  commitListeners.length = 0;
+  vi.useFakeTimers({ toFake: ['Date'] });
   vi.clearAllMocks();
   mockForum.mockResolvedValue({ id: 'forum-1' } as unknown as ForumChannel);
   mockFrozen.mockResolvedValue(false);
   finalizerFn = vi.fn(async () => {});
   setCommitWaitFinalizer(finalizerFn);
 });
+
+afterEach(() => vi.useRealTimers());
 
 describe('shouldFireWait', () => {
   it('fires when the tip moves off the baseline sha, regardless of date', () => {
@@ -113,19 +118,34 @@ describe('shouldFireWait', () => {
   });
 });
 
-describe('commit event activation', () => {
-  it('deletes the fix-incoming embed, runs the finalizer, and clears the entry', async () => {
-    initCommitWatches(clientMock(threadMock()));
+describe('branch tip activation', () => {
+  it('waits 15 minutes across a restart, then activates with the current tip', async () => {
+    const thread = threadMock();
+    initCommitWatches(clientMock(thread));
     await watchCommit('thread-1', entry());
 
-    await emit(COMMIT);
+    await pollTip(COMMIT);
+    const due = Date.now() + DELAY_MS;
+    expect((await readCommitWaits())['thread-1'].notifyAfter).toBe(due);
+    expect(finalizerFn).not.toHaveBeenCalled();
+
+    const laterCommit = { ...COMMIT, sha: 'c'.repeat(40), short: 'ccccccc' };
+    vi.setSystemTime(due - 1);
+    initCommitWatches(clientMock(thread));
+    await pollTip(laterCommit);
+    expect(finalizerFn).not.toHaveBeenCalled();
+    expect(thread.messages.fetch).not.toHaveBeenCalled();
+
+    vi.setSystemTime(due);
+    await pollTip(laterCommit);
 
     expect(finalizerFn).toHaveBeenCalledTimes(1);
-    const [thread, forum, e, commit] = finalizerFn.mock.calls[0];
-    expect(thread.id).toBe('thread-1');
+    const [activatedThread, forum, e, commit] = finalizerFn.mock.calls[0];
+    expect(activatedThread.id).toBe('thread-1');
     expect(forum).toEqual({ id: 'forum-1' });
     expect(e.ticketId).toBe('42');
-    expect(commit).toMatchObject({ sha: COMMIT.sha, short: 'aaaaaaa', branch: 'testing' });
+    expect(commit).toEqual(laterCommit);
+    expect(thread.messages.fetch).toHaveBeenCalledWith('msg-1');
     expect(Object.keys(await readCommitWaits())).toHaveLength(0);
   });
 
@@ -133,7 +153,7 @@ describe('commit event activation', () => {
     initCommitWatches(clientMock(threadMock()));
     await watchCommit('thread-1', entry({ baselineSha: COMMIT.sha }));
 
-    await emit(COMMIT);
+    await pollAfterDelay(COMMIT);
 
     expect(finalizerFn).not.toHaveBeenCalled();
     expect(Object.keys(await readCommitWaits())).toEqual(['thread-1']);
@@ -143,7 +163,7 @@ describe('commit event activation', () => {
     initCommitWatches(clientMock(null));
     await watchCommit('thread-1', entry());
 
-    await emit(COMMIT);
+    await pollAfterDelay(COMMIT);
 
     expect(Object.keys(await readCommitWaits())).toHaveLength(0);
   });
@@ -152,7 +172,7 @@ describe('commit event activation', () => {
     initCommitWatches(clientMock(threadMock({ archived: true })));
     await watchCommit('thread-1', entry());
 
-    await emit(COMMIT);
+    await pollAfterDelay(COMMIT);
 
     expect(finalizerFn).not.toHaveBeenCalled();
     expect(Object.keys(await readCommitWaits())).toHaveLength(0);
@@ -162,7 +182,7 @@ describe('commit event activation', () => {
     initCommitWatches(clientMock(threadMock({ locked: true })));
     await watchCommit('thread-1', entry());
 
-    await emit(COMMIT);
+    await pollAfterDelay(COMMIT);
 
     expect(finalizerFn).not.toHaveBeenCalled();
     expect(Object.keys(await readCommitWaits())).toHaveLength(0);
@@ -171,9 +191,11 @@ describe('commit event activation', () => {
   it('does not activate an entry cancelled by a superseding staff action', async () => {
     initCommitWatches(clientMock(threadMock()));
     await watchCommit('thread-1', entry());
+    await pollTip(COMMIT);
     await cancelCommitWatch('thread-1');
 
-    await emit(COMMIT);
+    vi.setSystemTime(Date.now() + DELAY_MS);
+    await pollTip(COMMIT);
 
     expect(finalizerFn).not.toHaveBeenCalled();
     expect(Object.keys(await readCommitWaits())).toHaveLength(0);
@@ -184,7 +206,7 @@ describe('commit event activation', () => {
     finalizerFn.mockRejectedValue(new Error('discord blew up'));
     await watchCommit('thread-1', entry());
 
-    await emit(COMMIT);
+    await pollAfterDelay(COMMIT);
 
     expect(Object.keys(await readCommitWaits())).toEqual(['thread-1']);
   });
@@ -196,7 +218,7 @@ describe('freeze deferral', () => {
     initCommitWatches(clientMock(threadMock()));
     await watchCommit('thread-1', entry());
 
-    await emit(COMMIT);
+    await pollAfterDelay(COMMIT);
 
     const stored = (await readCommitWaits())['thread-1'];
     expect(stored?.pendingCommit).toMatchObject({ sha: COMMIT.sha });

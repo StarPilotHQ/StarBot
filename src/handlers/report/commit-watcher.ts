@@ -1,4 +1,3 @@
-import { EventEmitter } from 'node:events';
 import { loadConfig } from '../../config.js';
 import { createLogger } from '../../logger.js';
 import { createStore } from '../../store.js';
@@ -16,10 +15,10 @@ export interface CommitTip {
 
 const stateStore = createStore<{ sha: string }>('commit-watcher');
 
-export const commitEvents = new EventEmitter();
+let branchTipHandler: ((commit: CommitTip) => Promise<void>) | undefined;
 
-export function onCommit(fn: (commit: CommitTip) => void): void {
-  commitEvents.on('commit', fn);
+export function onBranchTip(handler: (commit: CommitTip) => Promise<void>): void {
+  branchTipHandler = handler;
 }
 
 export function waitBranchConfigured(): boolean {
@@ -44,16 +43,17 @@ export async function pollOnce(): Promise<void> {
     const tip = await fetchBranchTip(repo, uatWaitBranch);
     if (!tip) return;
     const last = await stateStore.get('last');
-    if (last?.sha === tip.sha) return;
-    await stateStore.set('last', { sha: tip.sha });
-    log.info({ sha: tip.short, branch: uatWaitBranch, repo }, 'New commit on watch branch');
-    commitEvents.emit('commit', {
+    if (last?.sha !== tip.sha) {
+      await stateStore.set('last', { sha: tip.sha });
+      log.info({ sha: tip.short, branch: uatWaitBranch, repo }, 'New commit on watch branch');
+    }
+    await branchTipHandler?.({
       sha: tip.sha,
       short: tip.short,
       date: tip.date,
       branch: uatWaitBranch,
       repo,
-    } satisfies CommitTip);
+    });
   } catch (err) {
     log.warn({ err }, 'Commit watcher poll failed');
   } finally {

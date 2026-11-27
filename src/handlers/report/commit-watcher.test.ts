@@ -26,7 +26,7 @@ vi.mock('../../github.js', () => ({
 
 import { loadConfig } from '../../config.js';
 import { fetchBranchTip } from '../../github.js';
-import { pollOnce, onCommit, waitBranchConfigured, type CommitTip } from './commit-watcher.js';
+import { pollOnce, onBranchTip, waitBranchConfigured, type CommitTip } from './commit-watcher.js';
 
 const mockConfig = vi.mocked(loadConfig);
 const mockTip = vi.mocked(fetchBranchTip);
@@ -37,7 +37,7 @@ function tip(sha: string): CommitTip & { subject: string } {
 
 async function collect(): Promise<CommitTip[]> {
   const seen: CommitTip[] = [];
-  onCommit(c => seen.push(c));
+  onBranchTip(async c => { seen.push(c); });
   return seen;
 }
 
@@ -62,20 +62,20 @@ describe('pollOnce', () => {
     expect(backing['last']).toEqual({ sha: 'a'.repeat(40) });
   });
 
-  it('does not re-emit an unchanged sha', async () => {
+  it('delivers an unchanged tip so report deadlines can be checked', async () => {
     mockTip.mockResolvedValue(tip('a'.repeat(40)));
     const seen = await collect();
     await pollOnce();
     await pollOnce();
-    expect(seen).toHaveLength(1);
+    expect(seen).toHaveLength(2);
   });
 
-  it('does not re-emit the stored sha after a restart', async () => {
+  it('delivers the current tip after a restart even when its sha is stored', async () => {
     backing['last'] = { sha: 'b'.repeat(40) };
     mockTip.mockResolvedValue(tip('b'.repeat(40)));
     const seen = await collect();
     await pollOnce();
-    expect(seen).toHaveLength(0);
+    expect(seen).toHaveLength(1);
   });
 
   it('falls back to mainRepo when no wait repo is set', async () => {

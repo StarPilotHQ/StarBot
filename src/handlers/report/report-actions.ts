@@ -457,9 +457,8 @@ export async function finalizeWaitUser(thread: ThreadChannel, forum: ForumChanne
 }
 
 // "From commit newer than now" with the commit watcher configured: the report
-// stays dev-side (⚪ fix-incoming, IN PROGRESS tag) and the user is never
-// pinged - the thread is promoted to the commit-pinned WaitUser flow when a
-// commit lands.
+// stays dev-side (⚪ fix-incoming, IN PROGRESS tag) until the commit watcher
+// finishes the notification delay.
 async function finalizeFixIncoming(thread: ThreadChannel, forum: ForumChannel, params: WaitUserParams): Promise<void> {
   await clearOpenWaitUserPrompts(thread);
 
@@ -477,7 +476,7 @@ async function finalizeFixIncoming(thread: ThreadChannel, forum: ForumChannel, p
     `${params.message ? params.message + '\n\n' : ''}` +
     `The developers are working on your ${reportNoun(label)}. The fix will land in the next batch of commits pushed to the \`${uatWaitBranch}\` branch of ${loadConfig().projectName}.` +
     `\n\n${branchSwitchHint(installOwner, uatWaitBranch)}` +
-    `\n\nThis thread will update automatically once it's ready. You'll then update your local install - see [Using Galaxy (recommended)](${galaxyUpdateUrl()}).` +
+    `\n\nThis thread will update automatically at least 15 minutes after StarBot sees a new commit. Then update your local install. See [Using Galaxy (recommended)](${galaxyUpdateUrl()}).` +
     `\n(no @pings please)`;
 
   const sent = await thread.send({

@@ -138,8 +138,8 @@ export class BotEvents {
     initSnoozeScheduler(client);
     initDormantScheduler(client);
     initReportHealth(client);
-    initCommitWatcher();
     initCommitWatches(client);
+    initCommitWatcher();
 
     const commitHash = getCommitHash();
     if (commitHash) {
