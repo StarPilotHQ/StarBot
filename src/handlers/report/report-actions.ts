@@ -394,10 +394,15 @@ export async function finalizeWaitUser(thread: ThreadChannel, forum: ForumChanne
     ? "Click **Ready** below when you've tested and have feedback to share (no @pings please)."
     : "A **new route** is needed to reopen this report. Click **Send Route** below to submit one once you've tested (no @pings please).";
 
+  let intro = '';
   let required = '';
   if (params.mode === 'newer' && params.requiredSha) {
+    const { mainRepo, testingBranch } = loadConfig();
+    if (params.branch === testingBranch) {
+      intro = `A fix has been pushed to the **${testingBranch}** branch. Please test it and let us know if the issue still happens.\n\n`;
+    }
     const committed = params.requiredDate ? discordTimestamp(params.requiredDate) : null;
-    required = `\n\nThe route must be on commit ${formatGitCommit(params.requiredSha, `github.com/${loadConfig().mainRepo}`)} (${params.branch}${committed ? `, committed ${committed}` : ''}) or newer.`;
+    required = `\n\nThe route must be on commit ${formatGitCommit(params.requiredSha, `github.com/${mainRepo}`)} (${params.branch}${committed ? `, committed ${committed}` : ''}) or newer.`;
   } else if (params.mode === 'newernow' && requiredDate) {
     const committed = discordTimestamp(requiredDate);
     const { testingBranch, projectName, mainRepo } = loadConfig();
@@ -407,7 +412,7 @@ export async function finalizeWaitUser(thread: ThreadChannel, forum: ForumChanne
   const embed = new EmbedBuilder()
     .setColor(COLORS.amber)
     .setTitle(WAITING_FOR_USER_TITLE)
-    .setDescription(`${params.message ? params.message + '\n\n' : ''}${action}${required}`)
+    .setDescription(`${intro}${params.message ? params.message + '\n\n' : ''}${action}${required}`)
     .setTimestamp();
 
   // With no resolvable submitter, a 'sub' Ready and the Fixed button reject everyone -
