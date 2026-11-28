@@ -390,7 +390,7 @@ export async function finalizeWaitUser(thread: ThreadChannel, forum: ForumChanne
   await setThreadStatusEmoji(thread, 'waiting-for-user');
 
   const needsRoute = params.mode !== 'anytime';
-  const action = params.mode === 'anytime'
+  let action = params.mode === 'anytime'
     ? "Click **Ready** below when you've tested and have feedback to share (no @pings please)."
     : "A **new route** is needed to reopen this report. Click **Send Route** below to submit one once you've tested (no @pings please).";
 
@@ -399,7 +399,8 @@ export async function finalizeWaitUser(thread: ThreadChannel, forum: ForumChanne
   if (params.mode === 'newer' && params.requiredSha) {
     const { mainRepo, testingBranch } = loadConfig();
     if (params.branch === testingBranch) {
-      intro = `A fix has been pushed to the **${testingBranch}** branch. Please test it and let us know if the issue still happens.\n\n`;
+      intro = `An attempted fix for this issue has been pushed to the **${testingBranch}** branch. Please update, test it, and let us know if the issue is resolved.\n\n`;
+      action = `If the issue persists, we need a **new route** from the updated **${testingBranch}** build to investigate further. Click **Send Route** below to submit one once you've tested (no @pings please).`;
     }
     const committed = params.requiredDate ? discordTimestamp(params.requiredDate) : null;
     required = `\n\nThe route must be on commit ${formatGitCommit(params.requiredSha, `github.com/${mainRepo}`)} (${params.branch}${committed ? `, committed ${committed}` : ''}) or newer.`;
